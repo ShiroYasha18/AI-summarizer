@@ -162,6 +162,37 @@ input:focus {
   font-size: 12px;
 }
 
+.loader {
+  margin-top: 10px;
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.spinner {
+  width: 16px;
+  height: 16px;
+  border-radius: 999px;
+  border: 2px solid rgba(232, 234, 237, 0.22);
+  border-top-color: rgba(138, 180, 248, 0.95);
+  animation: spin 900ms linear infinite;
+}
+
+.loaderText {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 .hidden {
   display: none !important;
 }

@@ -90,10 +90,31 @@
         </div>
 
         <div id="meta" class="meta"></div>
+        <div id="loader" class="loader hidden">
+          <div class="spinner"></div>
+          <div id="loaderText" class="loaderText">Loading…</div>
+        </div>
 
         <section id="risk" class="risk"></section>
 
         <section class="cards" id="metrics"></section>
+
+        <section class="split">
+          <div class="panelSub">
+            <div class="panelHeader">
+              <h3>Medications</h3>
+              <div id="rxMeta" class="meta"></div>
+            </div>
+            <div id="rx" class="notes"></div>
+          </div>
+          <div class="panelSub">
+            <div class="panelHeader">
+              <h3>Lab Reports</h3>
+              <div id="labsMeta" class="meta"></div>
+            </div>
+            <div id="labs" class="notes"></div>
+          </div>
+        </section>
 
         <section class="charts">
           <div class="chartCard">

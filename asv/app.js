@@ -22,6 +22,12 @@ const els = {
   notes: document.getElementById("notes"),
   genAi: document.getElementById("genAi"),
   aiSummary: document.getElementById("aiSummary"),
+  rxMeta: document.getElementById("rxMeta"),
+  rx: document.getElementById("rx"),
+  labsMeta: document.getElementById("labsMeta"),
+  labs: document.getElementById("labs"),
+  loader: document.getElementById("loader"),
+  loaderText: document.getElementById("loaderText"),
 };
 
 let charts = {
@@ -71,6 +77,22 @@ function deltaStr(a, b, decimals = 0) {
 
 function byId(id) {
   return document.getElementById(id);
+}
+
+function setBusy(on, text) {
+  setHidden(els.loader, !on);
+  if (els.loaderText) els.loaderText.textContent = text || "Loading…";
+  els.load.disabled = Boolean(on);
+  els.genAi.disabled = Boolean(on);
+  els.refreshOverview.disabled = Boolean(on);
+  els.mode.disabled = Boolean(on);
+  els.patient.disabled = Boolean(on);
+  els.range.disabled = Boolean(on);
+  els.start.disabled = Boolean(on);
+  els.end.disabled = Boolean(on);
+  els.simplifyNotes.disabled = Boolean(on);
+  els.saveApi.disabled = Boolean(on);
+  els.apiBase.disabled = Boolean(on);
 }
 
 async function apiGet(path) {
@@ -277,6 +299,51 @@ function renderNotes(payload) {
   });
 }
 
+function renderGroupList(container, title, items) {
+  const card = document.createElement("div");
+  card.className = "note";
+  const top = document.createElement("div");
+  top.className = "noteTop";
+  const t = document.createElement("div");
+  t.className = "noteDate";
+  t.textContent = title;
+  top.appendChild(t);
+  card.appendChild(top);
+  const text = document.createElement("div");
+  text.className = "noteText";
+  text.style.whiteSpace = "pre-wrap";
+  if (!items.length) text.textContent = "—";
+  else text.textContent = items.map((x) => `• ${x}`).join("\n");
+  card.appendChild(text);
+  container.appendChild(card);
+}
+
+function renderRxLabs(payload) {
+  clearNode(els.rx);
+  clearNode(els.labs);
+  if (els.rxMeta) els.rxMeta.textContent = "";
+  if (els.labsMeta) els.labsMeta.textContent = "";
+
+  const rx = payload?.rx || {};
+  const labs = payload?.labs || {};
+
+  const active = Array.isArray(rx.active_medications) ? rx.active_medications : [];
+  const inactive = Array.isArray(rx.inactive_medications) ? rx.inactive_medications : [];
+  const abn = Array.isArray(labs.abnormal_labs) ? labs.abnormal_labs : [];
+  const resolved = Array.isArray(labs.resolved_labs) ? labs.resolved_labs : [];
+
+  const rxAsOf = String(rx.as_of_date || "").trim();
+  const labsAsOf = String(labs.as_of_date || "").trim();
+
+  if (els.rxMeta) els.rxMeta.textContent = `${rxAsOf ? `As of ${rxAsOf}. ` : ""}Active ${active.length}, inactive ${inactive.length}.`;
+  if (els.labsMeta) els.labsMeta.textContent = `${labsAsOf ? `As of ${labsAsOf}. ` : ""}Abnormal ${abn.length}, resolved ${resolved.length}.`;
+
+  renderGroupList(els.rx, "Active", active);
+  renderGroupList(els.rx, "Inactive", inactive);
+  renderGroupList(els.labs, "Abnormal", abn);
+  renderGroupList(els.labs, "Resolved", resolved);
+}
+
 function renderCharts(payload) {
   destroyCharts();
   const rows = payload?.checkins || [];
@@ -368,72 +435,89 @@ function setMode(mode) {
 }
 
 async function loadPatients() {
-  const data = await apiGet("/api/patients");
-  clearNode(els.patient);
-  (data.patients || []).forEach((pid) => {
-    const opt = document.createElement("option");
-    opt.value = pid;
-    opt.textContent = pid;
-    els.patient.appendChild(opt);
-  });
+  setBusy(true, "Loading patients…");
+  try {
+    const data = await apiGet("/api/patients");
+    clearNode(els.patient);
+    (data.patients || []).forEach((pid) => {
+      const opt = document.createElement("option");
+      opt.value = pid;
+      opt.textContent = pid;
+      els.patient.appendChild(opt);
+    });
+  } finally {
+    setBusy(false);
+  }
 }
 
 async function loadOverview() {
-  const data = await apiGet("/api/doctor/overview");
-  const tbody = els.overviewTable.querySelector("tbody");
-  clearNode(tbody);
-  (data.rows || []).forEach((r) => {
-    const tr = document.createElement("tr");
-    const td1 = document.createElement("td");
-    td1.textContent = r.patient_id || "";
-    const td2 = document.createElement("td");
-    td2.textContent = r.last_checkin || "";
-    const td3 = document.createElement("td");
-    td3.textContent = r.risk || "";
-    const td4 = document.createElement("td");
-    td4.textContent = String(r.active_meds ?? "");
-    const td5 = document.createElement("td");
-    td5.textContent = String(r.abnormal_labs ?? "");
-    tr.appendChild(td1);
-    tr.appendChild(td2);
-    tr.appendChild(td3);
-    tr.appendChild(td4);
-    tr.appendChild(td5);
-    tr.addEventListener("click", () => {
-      els.patient.value = r.patient_id;
-      els.load.click();
-      window.scrollTo({ top: 0, behavior: "smooth" });
+  setBusy(true, "Loading overview…");
+  try {
+    const data = await apiGet("/api/doctor/overview");
+    const tbody = els.overviewTable.querySelector("tbody");
+    clearNode(tbody);
+    (data.rows || []).forEach((r) => {
+      const tr = document.createElement("tr");
+      const td1 = document.createElement("td");
+      td1.textContent = r.patient_id || "";
+      const td2 = document.createElement("td");
+      td2.textContent = r.last_checkin || "";
+      const td3 = document.createElement("td");
+      td3.textContent = r.risk || "";
+      const td4 = document.createElement("td");
+      td4.textContent = String(r.active_meds ?? "");
+      const td5 = document.createElement("td");
+      td5.textContent = String(r.abnormal_labs ?? "");
+      tr.appendChild(td1);
+      tr.appendChild(td2);
+      tr.appendChild(td3);
+      tr.appendChild(td4);
+      tr.appendChild(td5);
+      tr.addEventListener("click", () => {
+        els.patient.value = r.patient_id;
+        els.load.click();
+        window.scrollTo({ top: 0, behavior: "smooth" });
+      });
+      tbody.appendChild(tr);
     });
-    tbody.appendChild(tr);
-  });
+  } finally {
+    setBusy(false);
+  }
 }
 
 async function loadDashboard() {
-  els.aiSummary.textContent = "";
-  const role = els.mode.value;
-  const patientId = els.patient.value;
-  if (!patientId) return;
-  const start = els.start.value;
-  const end = els.end.value;
-  const simplify = role === "doctor" && els.simplifyNotes.checked ? "&simplify_notes=1" : "";
-  const payload = await apiGet(
-    `/api/patients/${encodeURIComponent(patientId)}/dashboard?role=${role}&start=${start}&end=${end}${simplify}`
-  );
-  els.meta.textContent = `Showing ${payload.start_date} → ${payload.end_date}. Deltas are vs baseline (first day).`;
-  renderRisk(payload.risk_alerts);
-  renderMetricCards(payload);
-  renderCharts(payload);
-  renderNotes(payload);
+  setBusy(true, "Loading dashboard…");
+  try {
+    els.aiSummary.textContent = "";
+    const role = els.mode.value;
+    const patientId = els.patient.value;
+    if (!patientId) return;
+    const start = els.start.value;
+    const end = els.end.value;
+    const simplify = role === "doctor" && els.simplifyNotes.checked ? "&simplify_notes=1" : "";
+    const payload = await apiGet(
+      `/api/patients/${encodeURIComponent(patientId)}/dashboard?role=${role}&start=${start}&end=${end}${simplify}`
+    );
+    els.meta.textContent = `Showing ${payload.start_date} → ${payload.end_date}. Deltas are vs baseline (first day).`;
+    renderRisk(payload.risk_alerts);
+    renderMetricCards(payload);
+    renderRxLabs(payload);
+    renderCharts(payload);
+    renderNotes(payload);
+  } finally {
+    setBusy(false);
+  }
 }
 
 async function genAiSummary() {
-  const role = els.mode.value;
-  const patientId = els.patient.value;
-  const start = els.start.value;
-  const end = els.end.value;
-  if (!patientId) return;
-  els.aiSummary.textContent = "Loading...";
+  setBusy(true, "Generating AI summary…");
   try {
+    const role = els.mode.value;
+    const patientId = els.patient.value;
+    const start = els.start.value;
+    const end = els.end.value;
+    if (!patientId) return;
+    els.aiSummary.textContent = "Loading...";
     const out = await apiPost(`/api/patients/${encodeURIComponent(patientId)}/ai-summary`, {
       role,
       start_date: start,
@@ -443,6 +527,8 @@ async function genAiSummary() {
     els.aiSummary.textContent = out.text || "";
   } catch (e) {
     els.aiSummary.textContent = String(e?.message || e || "Failed");
+  } finally {
+    setBusy(false);
   }
 }
 

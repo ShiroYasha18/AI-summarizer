@@ -197,7 +197,7 @@ function riskAlerts(rows, rx, labs) {
     for (const x of abn.slice(0, 6)) {
       if (typeof x === "string") names.push(x);
       else if (x && typeof x === "object") {
-        const n = x.name || x.test || x.lab || "";
+        const n = x.test_name || x.testName || x.name || x.test || x.lab || "";
         if (n) names.push(String(n));
       }
     }
@@ -226,6 +226,83 @@ function latestSummaryOnOrBefore(summaries, endDate) {
     else if (dt && dt > endDate) break;
   }
   return best || {};
+}
+
+function stringifyBrief(v) {
+  if (v === null || v === undefined) return "";
+  if (typeof v === "string") return v;
+  if (typeof v === "number" || typeof v === "boolean") return String(v);
+  if (Array.isArray(v)) return v.map(stringifyBrief).filter(Boolean).join(", ");
+  if (typeof v === "object") {
+    const testName = v.test_name || v.testName || v.test || v.lab || v.name;
+    if (testName) {
+      const current =
+        v.current_value ??
+        v.currentValue ??
+        v.value ??
+        v.current ??
+        v.result ??
+        v.reading ??
+        v.level ??
+        null;
+      const unit = v.unit || v.units || "";
+      const resolved = isoDate10(v.resolution_date || v.resolutionDate || v.resolved_date || v.resolvedDate || v.date || "");
+      const prevHigh = v.previous_high ?? v.previousHigh ?? null;
+      const prevLow = v.previous_low ?? v.previousLow ?? null;
+      const ref = v.reference_range || v.referenceRange || v.ref_range || v.refRange || "";
+      const src = String(v.source_doc_id || v.sourceDocId || v.source || "").trim();
+
+      const head = String(testName).trim();
+      const val =
+        current === null || current === undefined || current === ""
+          ? ""
+          : `${String(current).trim()}${unit ? ` ${String(unit).trim()}` : ""}`;
+      const extras = [];
+      if (resolved) extras.push(`resolved ${resolved}`);
+      if (prevHigh !== null && prevHigh !== undefined && prevHigh !== "") extras.push(`prev high ${String(prevHigh).trim()}`);
+      if (prevLow !== null && prevLow !== undefined && prevLow !== "") extras.push(`prev low ${String(prevLow).trim()}`);
+      if (ref) extras.push(`ref ${String(ref).trim()}`);
+      if (src) extras.push(src);
+
+      const tail = extras.length ? ` (${extras.join(", ")})` : "";
+      return `${head}${val ? `: ${val}` : ""}${tail}`;
+    }
+
+    const medName = v.medication || v.drug || v.name || v.title || v.item;
+    if (medName) {
+      const dose = v.dose || v.dosage || v.strength || v.amount || "";
+      const freq = v.frequency || v.freq || v.schedule || "";
+      const route = v.route || "";
+      const parts = [];
+      if (dose) parts.push(String(dose).trim());
+      if (freq) parts.push(String(freq).trim());
+      if (route) parts.push(String(route).trim());
+      return `${String(medName).trim()}${parts.length ? ` — ${parts.join(" ")}` : ""}`;
+    }
+
+    try {
+      const s = JSON.stringify(v);
+      return s.length > 200 ? `${s.slice(0, 197)}...` : s;
+    } catch {
+      return "";
+    }
+  }
+  return String(v);
+}
+
+function normalizeStringList(items, max) {
+  const out = [];
+  const seen = new Set();
+  for (const it of Array.isArray(items) ? items : []) {
+    const s = stringifyBrief(it).trim().split(/\s+/).join(" ");
+    if (!s) continue;
+    const key = s.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(s);
+    if (out.length >= max) break;
+  }
+  return out;
 }
 
 function readJson(req) {
@@ -516,6 +593,18 @@ async function handle(req, res) {
           abnormal_count: abn.length,
           resolved_count: resolved.length,
           risk_flags: Array.isArray(labs.risk_flags) ? labs.risk_flags : []
+        },
+        rx: {
+          as_of_date: isoDate10(rx.as_of_date || latest.date || end),
+          active_medications: normalizeStringList(active, 60),
+          inactive_medications: normalizeStringList(inactive, 60),
+          risk_flags: normalizeStringList(rx.risk_flags, 20)
+        },
+        labs: {
+          as_of_date: isoDate10(labs.as_of_date || latest.date || end),
+          abnormal_labs: normalizeStringList(abn, 60),
+          resolved_labs: normalizeStringList(resolved, 60),
+          risk_flags: normalizeStringList(labs.risk_flags, 20)
         }
       });
     } catch (e) {
