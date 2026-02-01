@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>AI Summary Viewer</title>
+    <link rel="stylesheet" href="./styles.css">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">AI Summary Viewer</div>
+      <div class="controls">
+        <label class="field">
+          <span>Mode</span>
+          <select id="mode">
+            <option value="patient">Patient</option>
+            <option value="doctor">Doctor</option>
+          </select>
+        </label>
+
+        <label class="field">
+          <span>API</span>
+          <input id="apiBase" type="url" placeholder="Leave blank for auto">
+        </label>
+
+        <button id="saveApi" class="btn" type="button">Save</button>
+      </div>
+    </header>
+
+    <main class="container">
+      <section id="doctorOverview" class="panel hidden">
+        <div class="panelHeader">
+          <h2>Patients Overview</h2>
+          <button id="refreshOverview" class="btn" type="button">Refresh</button>
+        </div>
+        <div class="tableWrap">
+          <table class="table" id="overviewTable">
+            <thead>
+              <tr>
+                <th>Patient</th>
+                <th>Last check-in</th>
+                <th>Risk</th>
+                <th>Active meds</th>
+                <th>Abnormal labs</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panelHeader">
+          <h2 id="title">Patient Dashboard</h2>
+          <div class="row">
+            <label class="field">
+              <span>Patient</span>
+              <select id="patient"></select>
+            </label>
+
+            <label class="field">
+              <span>Range</span>
+              <select id="range">
+                <option value="7">7 days</option>
+                <option value="10">10 days</option>
+                <option value="15">15 days</option>
+                <option value="30" selected>30 days</option>
+                <option value="custom">Custom</option>
+              </select>
+            </label>
+
+            <label class="field" id="startWrap">
+              <span>Start</span>
+              <input id="start" type="date">
+            </label>
+
+            <label class="field" id="endWrap">
+              <span>End</span>
+              <input id="end" type="date">
+            </label>
+
+            <label class="toggle hidden" id="simplifyWrap">
+              <input id="simplifyNotes" type="checkbox">
+              <span>Simplify notes (AI)</span>
+            </label>
+
+            <button id="load" class="btn primary" type="button">Load</button>
+          </div>
+        </div>
+
+        <div id="meta" class="meta"></div>
+
+        <section id="risk" class="risk"></section>
+
+        <section class="cards" id="metrics"></section>
+
+        <section class="charts">
+          <div class="chartCard">
+            <div class="chartTitle">Blood Pressure (Baseline dashed)</div>
+            <canvas id="chartBp"></canvas>
+          </div>
+          <div class="chartCard">
+            <div class="chartTitle">Heart Rate &amp; Oxygen (Baseline dashed)</div>
+            <canvas id="chartHrSpo2"></canvas>
+          </div>
+          <div class="chartCard">
+            <div class="chartTitle">Temperature (Baseline dashed)</div>
+            <canvas id="chartTemp"></canvas>
+          </div>
+          <div class="chartCard">
+            <div class="chartTitle">Weight &amp; BMI (Baseline dashed)</div>
+            <canvas id="chartWeightBmi"></canvas>
+          </div>
+        </section>
+
+        <section class="split">
+          <div class="panelSub">
+            <div class="panelHeader">
+              <h3>Notes (At A Glance)</h3>
+              <div id="notesMeta" class="meta"></div>
+            </div>
+            <div id="notes" class="notes"></div>
+          </div>
+          <div class="panelSub">
+            <div class="panelHeader">
+              <h3>AI Summary</h3>
+              <button id="genAi" class="btn" type="button">Generate</button>
+            </div>
+            <div id="aiSummary" class="ai"></div>
+          </div>
+        </section>
+      </section>
+    </main>
+
+    <script src="./app.js"></script>
+  </body>
+</html>
