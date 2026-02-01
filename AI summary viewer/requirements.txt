@@ -1,0 +1,4 @@
+firebase-admin==6.5.0
+google-cloud-firestore==2.16.1
+google-genai==1.2.0
+flask==3.0.2
