@@ -28,4 +28,4 @@ dist/
 .vscode/
 
 .streamlit/
-.node_modules/
+node_modules/
