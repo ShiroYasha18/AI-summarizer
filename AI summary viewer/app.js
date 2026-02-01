@@ -32,9 +32,6 @@ let charts = {
 };
 
 function autoApiBase() {
-  const { hostname, protocol } = window.location;
-  const isLocal = hostname === "localhost" || hostname === "127.0.0.1";
-  if (isLocal) return `${protocol}//${hostname}:8081`;
   return "";
 }
 
@@ -45,7 +42,7 @@ function apiBase() {
   const isLocal = hostname === "localhost" || hostname === "127.0.0.1";
   if (isLocal && /:8080$/.test(stored)) {
     localStorage.removeItem("apiBase");
-    return autoApiBase();
+    return "";
   }
   return (stored || autoApiBase()).replace(/\/+$/, "");
 }
