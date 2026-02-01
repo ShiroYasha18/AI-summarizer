@@ -1,0 +1,11 @@
+{
+  "name": "ai-summary-viewer",
+  "private": true,
+  "type": "commonjs",
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "firebase-admin": "^12.7.0"
+  }
+}
