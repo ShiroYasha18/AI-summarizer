@@ -28,6 +28,12 @@ const els = {
   labs: document.getElementById("labs"),
   loader: document.getElementById("loader"),
   loaderText: document.getElementById("loaderText"),
+  genTasks: document.getElementById("genTasks"),
+  tasksMeta: document.getElementById("tasksMeta"),
+  tasks: document.getElementById("tasks"),
+  checkAlerts: document.getElementById("checkAlerts"),
+  alertsMeta: document.getElementById("alertsMeta"),
+  diagAlerts: document.getElementById("diagAlerts"),
 };
 
 let charts = {
@@ -84,6 +90,8 @@ function setBusy(on, text) {
   if (els.loaderText) els.loaderText.textContent = text || "Loading…";
   els.load.disabled = Boolean(on);
   els.genAi.disabled = Boolean(on);
+  els.genTasks.disabled = Boolean(on);
+  els.checkAlerts.disabled = Boolean(on);
   els.refreshOverview.disabled = Boolean(on);
   els.mode.disabled = Boolean(on);
   els.patient.disabled = Boolean(on);
@@ -344,6 +352,135 @@ function renderRxLabs(payload) {
   renderGroupList(els.labs, "Resolved", resolved);
 }
 
+function taskScheduleText(t) {
+  const type = String(t?.type || "").trim();
+  const s = t?.schedule || {};
+  if (type === "daily") {
+    const days = Number(s.days) || 1;
+    return `Daily × ${days}`;
+  }
+  if (type === "conditional") {
+    return "Conditional";
+  }
+  const date = String(s.date || "").trim();
+  return date ? `Once on ${date}` : "Once";
+}
+
+function renderTasks(payload) {
+  clearNode(els.tasks);
+  if (els.tasksMeta) els.tasksMeta.textContent = "";
+
+  const tasks = Array.isArray(payload?.tasks) ? payload.tasks : [];
+  const warning = String(payload?.warning || "").trim();
+  if (els.tasksMeta) els.tasksMeta.textContent = warning ? warning : `${tasks.length} task${tasks.length === 1 ? "" : "s"}`;
+
+  if (!tasks.length) {
+    renderGroupList(els.tasks, "Tasks", []);
+    return;
+  }
+
+  tasks.forEach((t) => {
+    const card = document.createElement("div");
+    card.className = "note";
+    const top = document.createElement("div");
+    top.className = "noteTop";
+    const title = document.createElement("div");
+    title.className = "noteDate";
+    title.textContent = String(t.title || "").trim();
+    const meta = document.createElement("div");
+    meta.className = "noteKeywords";
+    meta.textContent = `${String(t.audience || "patient")} · ${taskScheduleText(t)}`;
+    top.appendChild(title);
+    top.appendChild(meta);
+    card.appendChild(top);
+
+    const lines = [];
+    const action = String(t.action || "").trim();
+    const condition = String(t.condition || "").trim();
+    const explanation = String(t.explanation || "").trim();
+    if (action) lines.push(action);
+    if (condition) lines.push(`If: ${condition}`);
+    if (explanation) lines.push(explanation);
+
+    const text = document.createElement("div");
+    text.className = "noteText";
+    text.style.whiteSpace = "pre-wrap";
+    text.textContent = lines.length ? lines.join("\n") : "—";
+    card.appendChild(text);
+    els.tasks.appendChild(card);
+  });
+}
+
+function renderDiagnosisAlerts(payload) {
+  clearNode(els.diagAlerts);
+  if (els.alertsMeta) els.alertsMeta.textContent = "";
+
+  const alerts = Array.isArray(payload?.alerts) ? payload.alerts : [];
+  const warning = String(payload?.warning || "").trim();
+  if (els.alertsMeta) {
+    const meta = [`${alerts.length} alert${alerts.length === 1 ? "" : "s"}`];
+    if (warning) meta.push(warning);
+    els.alertsMeta.textContent = meta.join(" · ");
+  }
+  if (!alerts.length) return;
+
+  alerts.forEach((a) => {
+    const div = document.createElement("div");
+    div.className = `alert ${a.severity || "medium"}`;
+    const title = document.createElement("div");
+    title.className = "alertTitle";
+    title.textContent = a.headline || "Alert";
+    const action = document.createElement("div");
+    action.className = "alertAction";
+    action.style.whiteSpace = "pre-wrap";
+    const parts = [];
+    if (a.reason) parts.push(String(a.reason));
+    if (a.action) parts.push(String(a.action));
+    const ev = Array.isArray(a.evidence) ? a.evidence : [];
+    const evLines = [];
+    ev.forEach((e) => {
+      if (!e || typeof e !== "object") return;
+      if (e.kind === "vital") {
+        const label = String(e.label || e.metric || "Vital").trim();
+        const unit = String(e.unit || "").trim();
+        const thr = String(e.threshold || "").trim();
+        const pts = Array.isArray(e.points) ? e.points : [];
+        pts.slice(0, 4).forEach((p) => {
+          const dt = String(p?.date || "").trim();
+          const val = p?.value;
+          if (dt && val !== null && val !== undefined && val !== "") {
+            evLines.push(`${label}: ${val}${unit ? ` ${unit}` : ""} on ${dt}${thr ? ` (${thr})` : ""}`);
+          }
+        });
+        return;
+      }
+      if (e.kind === "note") {
+        const pts = Array.isArray(e.points) ? e.points : [];
+        pts.slice(0, 2).forEach((p) => {
+          const dt = String(p?.date || "").trim();
+          const kw = String(p?.keyword || "").trim();
+          const txt = String(p?.text || "").trim();
+          const head = kw ? `Note mentions ${kw}` : "Note";
+          if (dt) evLines.push(`${head} on ${dt}: ${txt || "…"}`);
+          else if (txt) evLines.push(`${head}: ${txt}`);
+        });
+        return;
+      }
+      if (e.kind === "flag") {
+        const src = String(e.source || "flags").trim();
+        const flags = Array.isArray(e.flags) ? e.flags : [];
+        if (flags.length) evLines.push(`${src}: ${flags.join(" · ")}`);
+      }
+    });
+    if (evLines.length) parts.push(`Observed:\n${evLines.map((x) => `- ${x}`).join("\n")}`);
+    if (a.explanation) parts.push(String(a.explanation));
+    action.textContent = parts.filter(Boolean).join("\n");
+    div.appendChild(title);
+    div.appendChild(action);
+    els.diagAlerts.appendChild(div);
+  });
+}
+
 function renderCharts(payload) {
   destroyCharts();
   const rows = payload?.checkins || [];
@@ -489,6 +626,10 @@ async function loadDashboard() {
   setBusy(true, "Loading dashboard…");
   try {
     els.aiSummary.textContent = "";
+    if (els.tasksMeta) els.tasksMeta.textContent = "";
+    if (els.alertsMeta) els.alertsMeta.textContent = "";
+    clearNode(els.tasks);
+    clearNode(els.diagAlerts);
     const role = els.mode.value;
     const patientId = els.patient.value;
     if (!patientId) return;
@@ -504,6 +645,48 @@ async function loadDashboard() {
     renderRxLabs(payload);
     renderCharts(payload);
     renderNotes(payload);
+  } finally {
+    setBusy(false);
+  }
+}
+
+async function genActionTasks() {
+  setBusy(true, "Generating tasks…");
+  try {
+    const role = els.mode.value;
+    const patientId = els.patient.value;
+    if (!patientId) return;
+    const start = els.start.value;
+    const end = els.end.value;
+    const out = await apiGet(
+      `/api/patients/${encodeURIComponent(patientId)}/action-tasks?role=${encodeURIComponent(role)}&start=${encodeURIComponent(
+        start
+      )}&end=${encodeURIComponent(end)}&pipeline=123`
+    );
+    renderTasks(out);
+  } catch (e) {
+    if (els.tasksMeta) els.tasksMeta.textContent = String(e?.message || e || "Failed");
+  } finally {
+    setBusy(false);
+  }
+}
+
+async function checkDiagnosisAlerts() {
+  setBusy(true, "Checking alerts…");
+  try {
+    const role = els.mode.value;
+    const patientId = els.patient.value;
+    if (!patientId) return;
+    const start = els.start.value;
+    const end = els.end.value;
+    const out = await apiGet(
+      `/api/patients/${encodeURIComponent(patientId)}/diagnosis-alerts?role=${encodeURIComponent(role)}&start=${encodeURIComponent(
+        start
+      )}&end=${encodeURIComponent(end)}&pipeline=123`
+    );
+    renderDiagnosisAlerts(out);
+  } catch (e) {
+    if (els.alertsMeta) els.alertsMeta.textContent = String(e?.message || e || "Failed");
   } finally {
     setBusy(false);
   }
@@ -600,5 +783,7 @@ els.patient.addEventListener("change", async () => {
 els.refreshOverview.addEventListener("click", () => loadOverview().catch(() => {}));
 els.load.addEventListener("click", () => loadDashboard().catch((e) => (els.meta.textContent = String(e?.message || e))));
 els.genAi.addEventListener("click", () => genAiSummary());
+els.genTasks.addEventListener("click", () => genActionTasks());
+els.checkAlerts.addEventListener("click", () => checkDiagnosisAlerts());
 
 bootstrap();

@@ -2,6 +2,76 @@ const fs = require("fs");
 const http = require("http");
 const path = require("path");
 
+function tryLoadDotEnv() {
+  const candidates = [
+    path.join(process.cwd(), ".env"),
+    path.join(__dirname, ".env"),
+    path.join(__dirname, "..", ".env")
+  ];
+
+  for (const fp of candidates) {
+    try {
+      if (!fs.existsSync(fp)) continue;
+      const raw = fs.readFileSync(fp, "utf8");
+      if (!String(raw || "").trim()) continue;
+      applyDotEnv(raw);
+      break;
+    } catch {}
+  }
+}
+
+function applyDotEnv(raw) {
+  const text = String(raw || "");
+  const lines = text.split(/\r?\n/);
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (!line) continue;
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    const eq = trimmed.indexOf("=");
+    if (eq <= 0) continue;
+    const key = trimmed.slice(0, eq).trim();
+    if (!key || process.env[key] !== undefined) continue;
+    let rest = trimmed.slice(eq + 1);
+    if (rest.startsWith(" ")) rest = rest.trimStart();
+    if (!rest) continue;
+
+    let val = "";
+    const q = rest[0];
+    if (q === '"' || q === "'") {
+      const end = rest.indexOf(q, 1);
+      if (end > 0) val = rest.slice(1, end);
+      else val = rest.slice(1);
+      if (val) process.env[key] = val;
+      continue;
+    }
+
+    if (rest.startsWith("{")) {
+      let acc = rest;
+      let balance = 0;
+      for (const ch of rest) {
+        if (ch === "{") balance++;
+        else if (ch === "}") balance--;
+      }
+      while (balance > 0 && i + 1 < lines.length) {
+        i++;
+        const next = lines[i] ?? "";
+        acc += `\n${next}`;
+        for (const ch of next) {
+          if (ch === "{") balance++;
+          else if (ch === "}") balance--;
+        }
+      }
+      val = acc.trim();
+      if (val) process.env[key] = val;
+      continue;
+    }
+
+    val = rest.trim();
+    if (val) process.env[key] = val;
+  }
+}
+
 function tryLoadServiceAccountJson() {
   if (String(process.env.FIREBASE_SERVICE_ACCOUNT_JSON || "").trim()) return;
   const fp = path.join(__dirname, "serviceAccountKey.json");
@@ -56,6 +126,7 @@ function parsePort() {
 }
 
 function main() {
+  tryLoadDotEnv();
   tryLoadServiceAccountJson();
   const apiHandler = require("./api/router.js");
   const root = __dirname;

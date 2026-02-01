@@ -152,6 +152,24 @@ function riskTopic(flag) {
   return null;
 }
 
+function medCount(rx) {
+  const active = rx && Array.isArray(rx.active_medications) ? rx.active_medications.length : null;
+  return typeof active === "number" && Number.isFinite(active) ? active : null;
+}
+
+function filterRiskFlags(flags, rx) {
+  const meds = medCount(rx);
+  const out = [];
+  for (const f of Array.isArray(flags) ? flags : []) {
+    const s = String(f || "").trim();
+    if (!s) continue;
+    const low = s.toLowerCase();
+    if (meds !== null && meds < 5 && low.includes("polypharmacy")) continue;
+    out.push(s);
+  }
+  return out;
+}
+
 function riskAlerts(rows, rx, labs) {
   const alerts = [];
   const metrics = (rows && rows.length) ? (statsForPeriod(rows).metrics || {}) : {};
@@ -179,7 +197,7 @@ function riskAlerts(rows, rx, labs) {
   if (hrMin !== undefined && hrMin <= 40) alerts.push({ severity: "high", headline: "Very low heart rate", action: "Talk to your doctor soon." });
 
   const flags = [];
-  if (rx && Array.isArray(rx.risk_flags)) flags.push(...rx.risk_flags);
+  if (rx && Array.isArray(rx.risk_flags)) flags.push(...filterRiskFlags(rx.risk_flags, rx));
   if (labs && Array.isArray(labs.risk_flags)) flags.push(...labs.risk_flags);
 
   for (const f of flags) {
@@ -351,34 +369,82 @@ async function listPatients(db) {
   return out;
 }
 
-async function loadDailyCheckins(db, patientId) {
+function parseCheckinDoc(doc) {
+  const d = doc.data() || {};
+  const dt = isoDate10(d.date || d.Date || d.createdAt || "");
+  const vitals = Array.isArray(d.vitals) ? d.vitals : [];
+  const v0 = vitals.length && vitals[0] && typeof vitals[0] === "object" ? vitals[0] : {};
+  const [sbp, dbp] = parseBp(v0.BP);
+  const notesObj = d.Notes && typeof d.Notes === "object" ? d.Notes : {};
+  return {
+    date: dt,
+    SBP: sbp,
+    DBP: dbp,
+    HR: parseFloatSafe(v0.HR),
+    RR: parseFloatSafe(v0.RR),
+    SpO2: parseFloatSafe(v0.SpO2),
+    Temp: parseFloatSafe(v0.Temp),
+    Pulse: parseFloatSafe(v0.Pulse),
+    weightKg: parseFloatSafe(v0.weightKg),
+    BMI: parseFloatSafe(v0.BMI),
+    notes_short: String(notesObj.short || ""),
+    notes_full: String(notesObj.full || "")
+  };
+}
+
+function sortByDateAsc(rows) {
+  rows.sort((a, b) => String(a.date).localeCompare(String(b.date)));
+  return rows;
+}
+
+async function loadDailyCheckinsAll(db, patientId) {
   const snap = await db.collection("Patients").doc(patientId).collection("DailyCheckIns").get();
-  const out = [];
-  for (const doc of snap.docs) {
-    const d = doc.data() || {};
-    const dt = isoDate10(d.date || d.Date || d.createdAt || "");
-    const vitals = Array.isArray(d.vitals) ? d.vitals : [];
-    const v0 = vitals.length && vitals[0] && typeof vitals[0] === "object" ? vitals[0] : {};
-    const [sbp, dbp] = parseBp(v0.BP);
-    const notesObj = d.Notes && typeof d.Notes === "object" ? d.Notes : {};
-    out.push({
-      date: dt,
-      SBP: sbp,
-      DBP: dbp,
-      HR: parseFloatSafe(v0.HR),
-      RR: parseFloatSafe(v0.RR),
-      SpO2: parseFloatSafe(v0.SpO2),
-      Temp: parseFloatSafe(v0.Temp),
-      Pulse: parseFloatSafe(v0.Pulse),
-      weightKg: parseFloatSafe(v0.weightKg),
-      BMI: parseFloatSafe(v0.BMI),
-      notes_short: String(notesObj.short || ""),
-      notes_full: String(notesObj.full || "")
-    });
+  const rows = snap.docs.map(parseCheckinDoc).filter((x) => x.date);
+  return sortByDateAsc(rows);
+}
+
+async function loadDailyCheckinsRecent(db, patientId, limit) {
+  const col = db.collection("Patients").doc(patientId).collection("DailyCheckIns");
+  let snap;
+  try {
+    snap = await col.orderBy("date", "desc").limit(Math.max(1, Number(limit) || 30)).get();
+  } catch {
+    return await loadDailyCheckinsAll(db, patientId);
   }
-  const cleaned = out.filter((x) => x.date);
-  cleaned.sort((a, b) => String(a.date).localeCompare(String(b.date)));
-  return cleaned;
+  let rows = snap.docs.map(parseCheckinDoc).filter((x) => x.date);
+  if (!rows.length) {
+    const probe = await col.limit(1).get();
+    if (probe.empty) return [];
+    const d = probe.docs[0].data() || {};
+    if (!("date" in d)) return await loadDailyCheckinsAll(db, patientId);
+  }
+  rows = sortByDateAsc(rows);
+  return rows;
+}
+
+async function loadDailyCheckinsRange(db, patientId, start, end) {
+  const col = db.collection("Patients").doc(patientId).collection("DailyCheckIns");
+  let q = col;
+  if (start) q = q.where("date", ">=", start);
+  if (end) q = q.where("date", "<=", end);
+  let snap;
+  try {
+    snap = await q.orderBy("date", "asc").get();
+  } catch {
+    const all = await loadDailyCheckinsAll(db, patientId);
+    return filterRange(all, start, end);
+  }
+  let rows = snap.docs.map(parseCheckinDoc).filter((x) => x.date);
+  if (!rows.length) {
+    const probe = await col.limit(1).get();
+    if (probe.empty) return [];
+    const d = probe.docs[0].data() || {};
+    if (!("date" in d)) {
+      const all = await loadDailyCheckinsAll(db, patientId);
+      return filterRange(all, start, end);
+    }
+  }
+  return rows;
 }
 
 async function loadSummaries(db, patientId, pipeline) {
@@ -396,6 +462,26 @@ async function loadSummaries(db, patientId, pipeline) {
   }
   out.sort((a, b) => String(a.date).localeCompare(String(b.date)));
   return out;
+}
+
+async function loadLatestSummary(db, patientId, pipeline) {
+  try {
+    const snap = await db
+      .collection("Summaries")
+      .where("patientId", "==", patientId)
+      .where("pipeline", "==", pipeline)
+      .orderBy("date", "desc")
+      .limit(1)
+      .get();
+    const doc = snap.docs[0];
+    if (!doc) return {};
+    const d = doc.data() || {};
+    const dt = isoDate10(d.date || "");
+    return dt ? { ...d, date: dt, _doc_id: doc.id } : {};
+  } catch {
+    const all = await loadSummaries(db, patientId, pipeline);
+    return all.length ? all[all.length - 1] : {};
+  }
 }
 
 async function geminiGenerateText(prompt) {
@@ -424,6 +510,26 @@ function extractFirstJsonObject(text) {
   } catch {
     return null;
   }
+}
+
+function extractFirstJsonValue(text) {
+  const s = String(text || "");
+  const candidates = [];
+  const oStart = s.indexOf("{");
+  const oEnd = s.lastIndexOf("}");
+  if (oStart !== -1 && oEnd !== -1 && oEnd > oStart) candidates.push({ start: oStart, end: oEnd });
+  const aStart = s.indexOf("[");
+  const aEnd = s.lastIndexOf("]");
+  if (aStart !== -1 && aEnd !== -1 && aEnd > aStart) candidates.push({ start: aStart, end: aEnd });
+  candidates.sort((a, b) => a.start - b.start);
+
+  for (const c of candidates) {
+    const candidate = s.slice(c.start, c.end + 1);
+    try {
+      return JSON.parse(candidate);
+    } catch {}
+  }
+  return null;
 }
 
 async function aiSimpleNotes(notes) {
@@ -466,6 +572,453 @@ async function aiSummary(role, patientId, startDate, endDate, vitalsStats, rx, l
   return await geminiGenerateText(prompt);
 }
 
+function safeText(v, maxLen) {
+  const s = String(v || "").trim().split(/\s+/).join(" ");
+  if (!s) return "";
+  const n = Number(maxLen) || 240;
+  return s.length > n ? `${s.slice(0, Math.max(0, n - 3)).trimEnd()}...` : s;
+}
+
+function fmtNum(v, decimals) {
+  if (v === null || v === undefined) return "—";
+  const n = Number(v);
+  if (!Number.isFinite(n)) return "—";
+  return n.toFixed(Number(decimals) || 0);
+}
+
+function toInt(v, def) {
+  const n = Number(v);
+  return Number.isFinite(n) ? Math.trunc(n) : def;
+}
+
+function normalizeAudience(v) {
+  const s = String(v || "").trim().toLowerCase();
+  if (s === "clinic" || s === "clinician" || s === "doctor") return "clinic";
+  if (s === "both") return "both";
+  return "patient";
+}
+
+function normalizeTask(input, idx) {
+  const t = input && typeof input === "object" ? input : {};
+  const title = safeText(t.title || t.task || t.name || "", 120);
+  if (!title) return null;
+  const audience = normalizeAudience(t.audience || t.for || t.owner);
+  const typeRaw = String(t.type || t.schedule_type || (t.schedule && t.schedule.type) || "").trim().toLowerCase();
+  const type = typeRaw === "once" || typeRaw === "daily" || typeRaw === "conditional" ? typeRaw : "once";
+  const schedule = t.schedule && typeof t.schedule === "object" ? t.schedule : {};
+  const startDate = isoDate10(schedule.start_date || schedule.start || t.start_date || "");
+  const endDate = isoDate10(schedule.end_date || schedule.end || t.end_date || "");
+  const dueDate = isoDate10(schedule.date || schedule.due_date || t.due_date || "");
+  const days = Math.max(1, toInt(schedule.days || t.days, 1));
+  const condition = safeText(t.condition || schedule.condition || "", 200);
+  const explanation = safeText(t.explanation || t.reason || "", 260);
+  const action = safeText(t.action || t.instructions || "", 260);
+  return {
+    id: safeText(t.id || `${idx + 1}`, 48),
+    audience,
+    title,
+    type,
+    schedule: {
+      start_date: startDate,
+      end_date: endDate,
+      date: dueDate,
+      days: type === "daily" ? days : undefined
+    },
+    condition: type === "conditional" ? condition : "",
+    action,
+    explanation
+  };
+}
+
+async function aiActionTasks(role, patientId, startDate, endDate, vitalsStats, notes, rx, labs) {
+  const key = String(process.env.GOOGLE_API_KEY || "").trim();
+  if (!key) return { tasks: [], warning: "GOOGLE_API_KEY not set" };
+  const notesIn = (Array.isArray(notes) ? notes : []).slice(0, 12).map((n) => ({ date: String(n.date || ""), note: String(n.raw || "").slice(0, 600) }));
+  const payload = {
+    role,
+    patient_id: patientId,
+    start_date: startDate,
+    end_date: endDate,
+    vitals_stats: vitalsStats,
+    prescriptions_asof: rx,
+    labs_asof: labs,
+    notes: notesIn
+  };
+  const prompt =
+    "Convert the notes and prescriptions into actionable tasks for patient and clinic.\n" +
+    "Rules:\n" +
+    "- Output ONLY valid JSON: {\"tasks\": [...]}\n" +
+    "- Each task: {\"title\",\"audience\":\"patient|clinic|both\",\"type\":\"once|daily|conditional\",\"schedule\":{...},\"condition\",\"action\",\"explanation\"}\n" +
+    "- For daily tasks: set type=\"daily\" and schedule.days=N (e.g., 3 days)\n" +
+    "- For conditional tasks: type=\"conditional\" and include condition\n" +
+    "- Keep <= 12 tasks. Titles short.\n\n" +
+    `JSON:\n${JSON.stringify(payload, null, 2)}`;
+  const text = await geminiGenerateText(prompt);
+  const parsed = extractFirstJsonValue(text);
+  const obj = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : null;
+  const tasksRaw = obj && Array.isArray(obj.tasks) ? obj.tasks : [];
+  const tasks = [];
+  for (let i = 0; i < tasksRaw.length; i++) {
+    const norm = normalizeTask(tasksRaw[i], i);
+    if (norm) tasks.push(norm);
+    if (tasks.length >= 12) break;
+  }
+  return { tasks };
+}
+
+function normalizeSeverity(v) {
+  const s = String(v || "").trim().toLowerCase();
+  if (s === "critical" || s === "high" || s === "medium" || s === "low") return s;
+  return "medium";
+}
+
+function normalizeSignal(v) {
+  const s = String(v || "").trim().toLowerCase();
+  const allowed = new Set([
+    "hypertensive_crisis",
+    "high_bp_with_symptoms",
+    "low_oxygen",
+    "high_fever",
+    "tachycardia_with_symptoms",
+    "bradycardia_with_symptoms",
+    "chest_pain",
+    "medication_or_lab_risk",
+    "other"
+  ]);
+  return allowed.has(s) ? s : "other";
+}
+
+function normalizeAiAlert(a) {
+  const o = a && typeof a === "object" ? a : {};
+  const headline = safeText(o.headline || "", 120);
+  if (!headline) return null;
+  return {
+    signal: normalizeSignal(o.signal),
+    severity: normalizeSeverity(o.severity),
+    headline,
+    reason: safeText(o.reason || "", 240),
+    action: safeText(o.action || "", 220),
+    patient_explanation: safeText(o.patient_explanation || o.patientExplanation || "", 420),
+    clinician_explanation: safeText(o.clinician_explanation || o.clinicianExplanation || "", 520)
+  };
+}
+
+function evidenceForSignal(signal, rows, notes, rx, labs) {
+  const ev = [];
+  const meds = normalizeStringList(rx && Array.isArray(rx.active_medications) ? rx.active_medications : [], 12);
+  const abnLabs = normalizeStringList(labs && Array.isArray(labs.abnormal_labs) ? labs.abnormal_labs : [], 12);
+
+  if (signal === "hypertensive_crisis") {
+    ev.push(vitEvidence("Systolic BP", "SBP", "mmHg", ">= 180", pointsWhere(rows, "SBP", (v) => v >= 180, 3)));
+    ev.push(vitEvidence("Diastolic BP", "DBP", "mmHg", ">= 120", pointsWhere(rows, "DBP", (v) => v >= 120, 3)));
+  } else if (signal === "high_bp_with_symptoms") {
+    ev.push(vitEvidence("Systolic BP", "SBP", "mmHg", ">= 160", pointsWhere(rows, "SBP", (v) => v >= 160, 3)));
+    ev.push(noteEvidence("Symptoms mentioned", noteMatches(notes, ["headache", "migraine", "dizzy", "dizziness", "chest pain", "shortness of breath", "breathless"], 2)));
+  } else if (signal === "low_oxygen") {
+    ev.push(vitEvidence("Oxygen (SpO2)", "SpO2", "%", "< 92", pointsWhere(rows, "SpO2", (v) => v < 92, 3)));
+    ev.push(noteEvidence("Breathing symptoms mentioned", noteMatches(notes, ["shortness of breath", "sob", "breathless", "difficulty breathing"], 2)));
+  } else if (signal === "high_fever") {
+    ev.push(vitEvidence("Temperature", "Temp", "°C", ">= 39.0", pointsWhere(rows, "Temp", (v) => v >= 39.0, 3)));
+    ev.push(noteEvidence("Symptoms mentioned", noteMatches(notes, ["confusion", "confused", "breathless", "shortness of breath"], 2)));
+  } else if (signal === "tachycardia_with_symptoms") {
+    ev.push(vitEvidence("Heart rate", "HR", "bpm", ">= 130", pointsWhere(rows, "HR", (v) => v >= 130, 3)));
+    ev.push(noteEvidence("Symptoms mentioned", noteMatches(notes, ["chest pain", "dizzy", "dizziness", "shortness of breath", "breathless"], 2)));
+  } else if (signal === "bradycardia_with_symptoms") {
+    ev.push(vitEvidence("Heart rate", "HR", "bpm", "<= 40", pointsWhere(rows, "HR", (v) => v <= 40, 3)));
+    ev.push(noteEvidence("Symptoms mentioned", noteMatches(notes, ["dizzy", "dizziness", "faint", "syncope", "lightheaded"], 2)));
+  } else if (signal === "chest_pain") {
+    ev.push(noteEvidence("Chest pain mentioned", noteMatches(notes, ["chest pain", "chest tightness", "pressure in chest"], 2)));
+  } else if (signal === "medication_or_lab_risk") {
+    if (meds.length) ev.push(flagEvidence("meds", meds));
+    if (abnLabs.length) ev.push(flagEvidence("abnormal_labs", abnLabs));
+  } else if (signal === "other") {
+    const bpHigh = pointsWhere(rows, "SBP", (v) => v >= 160, 3);
+    const spo2Low = pointsWhere(rows, "SpO2", (v) => v < 92, 3);
+    const tempHigh = pointsWhere(rows, "Temp", (v) => v >= 39.0, 3);
+    const hrHigh = pointsWhere(rows, "HR", (v) => v >= 130, 3);
+    const hrLow = pointsWhere(rows, "HR", (v) => v <= 40, 3);
+
+    ev.push(vitEvidence("Systolic BP", "SBP", "mmHg", ">= 160", bpHigh));
+    ev.push(vitEvidence("Oxygen (SpO2)", "SpO2", "%", "< 92", spo2Low));
+    ev.push(vitEvidence("Temperature", "Temp", "°C", ">= 39.0", tempHigh));
+    ev.push(vitEvidence("Heart rate", "HR", "bpm", ">= 130", hrHigh));
+    ev.push(vitEvidence("Heart rate", "HR", "bpm", "<= 40", hrLow));
+
+    ev.push(
+      noteEvidence(
+        "Symptoms mentioned",
+        noteMatches(
+          notes,
+          [
+            "headache",
+            "migraine",
+            "chest pain",
+            "chest tightness",
+            "pressure in chest",
+            "shortness of breath",
+            "sob",
+            "breathless",
+            "difficulty breathing",
+            "dizzy",
+            "dizziness",
+            "lightheaded",
+            "faint",
+            "syncope",
+            "confusion",
+            "confused",
+            "disoriented"
+          ],
+          2
+        )
+      )
+    );
+
+    if (meds.length) ev.push(flagEvidence("meds", meds));
+    if (abnLabs.length) ev.push(flagEvidence("abnormal_labs", abnLabs));
+  }
+
+  return ev.filter(Boolean);
+}
+
+async function aiRiskAlerts(role, patientId, startDate, endDate, rows, notes, rx, labs) {
+  const key = String(process.env.GOOGLE_API_KEY || "").trim();
+  if (!key) return { alerts: [], warning: "GOOGLE_API_KEY not set" };
+
+  const vitals = (Array.isArray(rows) ? rows : []).slice(-30).map((r) => ({
+    date: String(r?.date || ""),
+    SBP: r?.SBP ?? null,
+    DBP: r?.DBP ?? null,
+    HR: r?.HR ?? null,
+    SpO2: r?.SpO2 ?? null,
+    Temp: r?.Temp ?? null
+  }));
+
+  const symptoms = [
+    ...noteMatches(notes, ["headache", "migraine"], 3),
+    ...noteMatches(notes, ["chest pain", "chest tightness", "pressure in chest"], 3),
+    ...noteMatches(notes, ["shortness of breath", "sob", "breathless", "difficulty breathing"], 3),
+    ...noteMatches(notes, ["dizzy", "dizziness", "lightheaded", "faint", "syncope"], 3),
+    ...noteMatches(notes, ["confusion", "confused", "disoriented"], 3)
+  ].slice(0, 8);
+
+  const meds = normalizeStringList(rx && Array.isArray(rx.active_medications) ? rx.active_medications : [], 18);
+  const abnormalLabs = normalizeStringList(labs && Array.isArray(labs.abnormal_labs) ? labs.abnormal_labs : [], 18);
+
+  const observed = {
+    sbp_max: maxPoint(rows, "SBP"),
+    dbp_max: maxPoint(rows, "DBP"),
+    spo2_min: minPoint(rows, "SpO2"),
+    temp_max: maxPoint(rows, "Temp"),
+    hr_max: maxPoint(rows, "HR"),
+    hr_min: minPoint(rows, "HR")
+  };
+
+  const payload = {
+    role,
+    patient_id: patientId,
+    start_date: startDate,
+    end_date: endDate,
+    vitals_last_30: vitals,
+    observed_extremes: observed,
+    symptoms_from_notes: symptoms,
+    active_medications: meds,
+    abnormal_labs: abnormalLabs
+  };
+
+  const prompt =
+    "You are a clinical safety assistant.\n" +
+    "Generate risk alerts ONLY based on the provided data. Do not invent dates, values, symptoms, meds, or labs.\n" +
+    "Output ONLY valid JSON: {\"alerts\": [...]}\n" +
+    "Each alert:\n" +
+    "- signal: one of [hypertensive_crisis, high_bp_with_symptoms, low_oxygen, high_fever, tachycardia_with_symptoms, bradycardia_with_symptoms, chest_pain, medication_or_lab_risk, other]\n" +
+    "- severity: critical|high|medium|low\n" +
+    "- headline: short\n" +
+    "- reason: one sentence\n" +
+    "- action: one sentence\n" +
+    "- patient_explanation: short, normal language\n" +
+    "- clinician_explanation: short, clinical language\n" +
+    "Rules:\n" +
+    "- If there is no evidence for a risk, do not include that alert.\n" +
+    "- Keep <= 6 alerts.\n\n" +
+    `JSON:\n${JSON.stringify(payload, null, 2)}`;
+
+  const text = await geminiGenerateText(prompt);
+  if (!text) return { alerts: [], warning: "Gemini unavailable" };
+  const parsed = extractFirstJsonValue(text);
+  const obj = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : null;
+  if (!obj) return { alerts: [], warning: "Invalid Gemini response" };
+  const rawAlerts = obj && Array.isArray(obj.alerts) ? obj.alerts : [];
+
+  const out = [];
+  const medsCount = Array.isArray(meds) ? meds.length : 0;
+  for (const a of rawAlerts) {
+    const norm = normalizeAiAlert(a);
+    if (!norm) continue;
+    const evidence = evidenceForSignal(norm.signal, rows, notes, rx, labs);
+    if (!evidence.length) continue;
+    const polyText = `${norm.headline} ${norm.reason} ${norm.action} ${norm.patient_explanation} ${norm.clinician_explanation}`.toLowerCase();
+    if (medsCount < 5 && polyText.includes("polypharmacy")) continue;
+    out.push({
+      severity: norm.severity,
+      headline: norm.headline,
+      reason: norm.reason,
+      action: norm.action,
+      evidence,
+      explanation: role === "doctor" ? (norm.clinician_explanation || norm.reason) : (norm.patient_explanation || norm.reason)
+    });
+    if (out.length >= 6) break;
+  }
+
+  return { alerts: out, warning: "" };
+}
+
+function noteHasAny(notes, needles) {
+  const hay = (Array.isArray(notes) ? notes : []).map((n) => String(n.raw || n.text || "")).join(" ").toLowerCase();
+  if (!hay.trim()) return false;
+  for (const w of needles) if (hay.includes(w)) return true;
+  return false;
+}
+
+function noteMatches(notes, needles, limit) {
+  const out = [];
+  const uniq = new Set();
+  const want = (Array.isArray(needles) ? needles : []).map((x) => String(x || "").trim().toLowerCase()).filter(Boolean);
+  const max = Math.max(1, Number(limit) || 3);
+  for (let i = (Array.isArray(notes) ? notes.length : 0) - 1; i >= 0; i--) {
+    const n = notes[i] || {};
+    const text = String(n.raw || n.text || "").toLowerCase();
+    if (!text.trim()) continue;
+    let hit = "";
+    for (const w of want) {
+      if (text.includes(w)) {
+        hit = w;
+        break;
+      }
+    }
+    if (!hit) continue;
+    const dt = isoDate10(n.date || "");
+    const snippet = safeText(n.raw || n.text || "", 180);
+    const key = `${dt}::${hit}::${snippet}`;
+    if (uniq.has(key)) continue;
+    uniq.add(key);
+    out.push({ date: dt, keyword: hit, text: snippet });
+    if (out.length >= max) break;
+  }
+  return out;
+}
+
+function finite(v) {
+  return typeof v === "number" && Number.isFinite(v);
+}
+
+function maxPoint(rows, field) {
+  let best = null;
+  for (const r of Array.isArray(rows) ? rows : []) {
+    const v = r ? r[field] : null;
+    if (!finite(v)) continue;
+    if (!best || v > best.value) best = { date: String(r.date || ""), value: v };
+  }
+  return best;
+}
+
+function minPoint(rows, field) {
+  let best = null;
+  for (const r of Array.isArray(rows) ? rows : []) {
+    const v = r ? r[field] : null;
+    if (!finite(v)) continue;
+    if (!best || v < best.value) best = { date: String(r.date || ""), value: v };
+  }
+  return best;
+}
+
+function pointsWhere(rows, field, predicate, limit) {
+  const out = [];
+  const max = Math.max(1, Number(limit) || 3);
+  for (let i = (Array.isArray(rows) ? rows.length : 0) - 1; i >= 0; i--) {
+    const r = rows[i] || {};
+    const v = r[field];
+    if (!finite(v)) continue;
+    if (!predicate(v)) continue;
+    out.push({ date: String(r.date || ""), value: v });
+    if (out.length >= max) break;
+  }
+  return out.reverse();
+}
+
+function vitEvidence(label, metric, unit, threshold, points) {
+  const pts = Array.isArray(points) ? points.filter((p) => p && p.date && finite(p.value)) : [];
+  return pts.length ? { kind: "vital", label, metric, unit, threshold, points: pts } : null;
+}
+
+function noteEvidence(label, matches) {
+  const pts = Array.isArray(matches) ? matches.filter((m) => m && m.text) : [];
+  return pts.length ? { kind: "note", label, points: pts } : null;
+}
+
+function flagEvidence(source, flags) {
+  const items = normalizeStringList(flags, 8);
+  return items.length ? { kind: "flag", source, flags: items } : null;
+}
+
+function plainFlag(flag) {
+  const raw = String(flag || "").trim();
+  const s = raw.toLowerCase();
+  if (!s) return "";
+  if (s.includes("polypharmacy")) return "polypharmacy risk (many medications)";
+  return raw.split("_").join(" ").split(/\s+/).join(" ").trim();
+}
+
+function explainAlert(role, headline, evidence) {
+  const ev = Array.isArray(evidence) ? evidence : [];
+  const parts = [];
+  const vitals = ev.filter((e) => e && e.kind === "vital");
+  const notes = ev.filter((e) => e && e.kind === "note");
+  const flags = ev.filter((e) => e && e.kind === "flag");
+
+  if (vitals.length) {
+    const lines = [];
+    for (const v of vitals) {
+      const p0 = (v.points && v.points[0]) || null;
+      if (!p0) continue;
+      const day = p0.date ? ` on ${p0.date}` : "";
+      const unit = v.unit ? ` ${v.unit}` : "";
+      const thr = v.threshold ? ` (${v.threshold})` : "";
+      lines.push(`${v.label}: ${fmtNum(p0.value, 0)}${unit}${day}${thr}`);
+      if (lines.length >= 3) break;
+    }
+    if (lines.length) parts.push(lines.join(role === "doctor" ? "; " : ". "));
+  }
+
+  if (notes.length) {
+    const n0 = (notes[0].points && notes[0].points[0]) || null;
+    if (n0) {
+      const day = n0.date ? ` on ${n0.date}` : "";
+      parts.push(`Note mentions ${n0.keyword || "symptoms"}${day}: ${n0.text}`);
+    }
+  }
+
+  if (flags.length) {
+    if (role === "patient") {
+      const lines = [];
+      for (const f of flags) {
+        const src = String(f.source || "").trim();
+        const label = src === "rx" ? "Medication" : src === "labs" ? "Labs" : "Summary";
+        const items = (Array.isArray(f.flags) ? f.flags : []).map(plainFlag).filter(Boolean);
+        if (items.length) lines.push(`${label}: ${items.join(" · ")}`);
+      }
+      if (lines.length) parts.push(lines.join("\n"));
+    } else {
+      const f = flags.map((x) => `${x.source}: ${(x.flags || []).join(" · ")}`).filter(Boolean).join(" | ");
+      if (f) parts.push(`Flags: ${f}`);
+    }
+  }
+
+  const text = parts.filter(Boolean).join(role === "doctor" ? " | " : "\n");
+  if (!text) return "";
+  if (role === "patient") return safeText(text, 400);
+  return safeText(`${headline} — ${text}`, 520);
+}
+
 function parsePath(req) {
   const u = new URL(req.url, "http://localhost");
   return { pathname: u.pathname, searchParams: u.searchParams };
@@ -504,11 +1057,10 @@ async function handle(req, res) {
       const rows = [];
       const patients = await listPatients(db);
       for (const pid of patients) {
-        const checkins = await loadDailyCheckins(db, pid);
+        const checkins = await loadDailyCheckinsRecent(db, pid, 30);
         const lastDt = checkins.length ? String(checkins[checkins.length - 1].date) : "";
-        const recent = checkins.length > 30 ? checkins.slice(-30) : checkins;
-        const summaries = await loadSummaries(db, pid, pipeline);
-        const lastSum = summaries.length ? summaries[summaries.length - 1] : {};
+        const recent = checkins;
+        const lastSum = await loadLatestSummary(db, pid, pipeline);
         const rx = lastSum.prescriptionSummary && typeof lastSum.prescriptionSummary === "object" ? lastSum.prescriptionSummary : {};
         const labs = lastSum.labReportSummary && typeof lastSum.labReportSummary === "object" ? lastSum.labReportSummary : {};
         const alerts = riskAlerts(recent, rx, labs);
@@ -535,22 +1087,24 @@ async function handle(req, res) {
     const simplifyNotes = new Set(["1", "true", "yes"]).has(String(searchParams.get("simplify_notes") || "").trim().toLowerCase());
 
     try {
-      const checkins = await loadDailyCheckins(db, patientId);
-      if (!checkins.length) return json(res, 404, { patient_id: patientId, error: "No DailyCheckIns found." });
-
       let start = String(searchParams.get("start") || "").trim();
       let end = String(searchParams.get("end") || "").trim();
-      if (!start || !end) {
-        end = checkins[checkins.length - 1].date;
-        start = checkins[Math.max(0, checkins.length - 30)].date;
+      let filtered;
+      if (start && end) {
+        filtered = await loadDailyCheckinsRange(db, patientId, start, end);
+      } else {
+        filtered = await loadDailyCheckinsRecent(db, patientId, 30);
+        if (filtered.length) {
+          end = filtered[filtered.length - 1].date;
+          start = filtered[0].date;
+        }
       }
+      if (!filtered.length) return json(res, 404, { patient_id: patientId, error: "No DailyCheckIns found." });
 
-      const filtered = filterRange(checkins, start, end);
       const vitalsStats = statsForPeriod(filtered);
       const baseline = baselineMap(filtered, ["SBP", "DBP", "HR", "RR", "SpO2", "Temp", "Pulse", "weightKg", "BMI"]);
 
-      const summaries = await loadSummaries(db, patientId, pipeline);
-      const latest = latestSummaryOnOrBefore(summaries, end);
+      const latest = await loadLatestSummary(db, patientId, pipeline);
       const rx = latest.prescriptionSummary && typeof latest.prescriptionSummary === "object" ? latest.prescriptionSummary : {};
       const labs = latest.labReportSummary && typeof latest.labReportSummary === "object" ? latest.labReportSummary : {};
 
@@ -612,6 +1166,77 @@ async function handle(req, res) {
     }
   }
 
+  const tasksMatch = path.match(/^\/api\/patients\/([^/]+)\/action-tasks$/);
+  if (req.method === "GET" && tasksMatch) {
+    const patientId = decodeURIComponent(tasksMatch[1]);
+    const role = String(searchParams.get("role") || "patient").trim().toLowerCase();
+    const pipeline = String(searchParams.get("pipeline") || "123").trim();
+    try {
+      let start = String(searchParams.get("start") || "").trim();
+      let end = String(searchParams.get("end") || "").trim();
+      let filtered;
+      if (start && end) {
+        filtered = await loadDailyCheckinsRange(db, patientId, start, end);
+      } else {
+        filtered = await loadDailyCheckinsRecent(db, patientId, 30);
+        if (filtered.length) {
+          end = filtered[filtered.length - 1].date;
+          start = filtered[0].date;
+        }
+      }
+      if (!filtered.length) return json(res, 404, { patient_id: patientId, error: "No DailyCheckIns found." });
+
+      const vitalsStats = statsForPeriod(filtered);
+      const latest = await loadLatestSummary(db, patientId, pipeline);
+      const rx = latest.prescriptionSummary && typeof latest.prescriptionSummary === "object" ? latest.prescriptionSummary : {};
+      const labs = latest.labReportSummary && typeof latest.labReportSummary === "object" ? latest.labReportSummary : {};
+      const notes = notesFromRows(filtered, 12);
+
+      const out = await aiActionTasks(role, patientId, start, end, vitalsStats, notes, rx, labs);
+      return json(res, 200, { patient_id: patientId, start_date: start, end_date: end, tasks: out.tasks || [], warning: out.warning || "" });
+    } catch (e) {
+      return json(res, 500, { error: String(e?.message || e || "Failed") });
+    }
+  }
+
+  const diagMatch = path.match(/^\/api\/patients\/([^/]+)\/diagnosis-alerts$/);
+  if (req.method === "GET" && diagMatch) {
+    const patientId = decodeURIComponent(diagMatch[1]);
+    const role = String(searchParams.get("role") || "patient").trim().toLowerCase();
+    const pipeline = String(searchParams.get("pipeline") || "123").trim();
+    try {
+      let start = String(searchParams.get("start") || "").trim();
+      let end = String(searchParams.get("end") || "").trim();
+      let filtered;
+      if (start && end) {
+        filtered = await loadDailyCheckinsRange(db, patientId, start, end);
+      } else {
+        filtered = await loadDailyCheckinsRecent(db, patientId, 30);
+        if (filtered.length) {
+          end = filtered[filtered.length - 1].date;
+          start = filtered[0].date;
+        }
+      }
+      if (!filtered.length) return json(res, 404, { patient_id: patientId, error: "No DailyCheckIns found." });
+
+      const latest = await loadLatestSummary(db, patientId, pipeline);
+      const rx = latest.prescriptionSummary && typeof latest.prescriptionSummary === "object" ? latest.prescriptionSummary : {};
+      const labs = latest.labReportSummary && typeof latest.labReportSummary === "object" ? latest.labReportSummary : {};
+      const notes = notesFromRows(filtered, 12);
+
+      const out = await aiRiskAlerts(role, patientId, start, end, filtered, notes, rx, labs);
+      return json(res, 200, {
+        patient_id: patientId,
+        start_date: start,
+        end_date: end,
+        alerts: out?.alerts || [],
+        warning: out?.warning || ""
+      });
+    } catch (e) {
+      return json(res, 500, { error: String(e?.message || e || "Failed") });
+    }
+  }
+
   const aiMatch = path.match(/^\/api\/patients\/([^/]+)\/ai-summary$/);
   if (req.method === "POST" && aiMatch) {
     const patientId = decodeURIComponent(aiMatch[1]);
@@ -622,17 +1247,20 @@ async function handle(req, res) {
       let start = String(payload.start_date || "").trim();
       let end = String(payload.end_date || "").trim();
 
-      const checkins = await loadDailyCheckins(db, patientId);
-      if (!checkins.length) return json(res, 404, { error: "No DailyCheckIns found." });
-      if (!start || !end) {
-        end = checkins[checkins.length - 1].date;
-        start = checkins[Math.max(0, checkins.length - 30)].date;
+      let filtered;
+      if (start && end) {
+        filtered = await loadDailyCheckinsRange(db, patientId, start, end);
+      } else {
+        filtered = await loadDailyCheckinsRecent(db, patientId, 30);
+        if (filtered.length) {
+          end = filtered[filtered.length - 1].date;
+          start = filtered[0].date;
+        }
       }
-      const filtered = filterRange(checkins, start, end);
+      if (!filtered.length) return json(res, 404, { error: "No DailyCheckIns found." });
       const vitalsStats = statsForPeriod(filtered);
 
-      const summaries = await loadSummaries(db, patientId, pipeline);
-      const latest = latestSummaryOnOrBefore(summaries, end);
+      const latest = await loadLatestSummary(db, patientId, pipeline);
       const rx = latest.prescriptionSummary && typeof latest.prescriptionSummary === "object" ? latest.prescriptionSummary : {};
       const labs = latest.labReportSummary && typeof latest.labReportSummary === "object" ? latest.labReportSummary : {};
 
