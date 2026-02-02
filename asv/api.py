@@ -477,18 +477,15 @@ def _ai_summary(role: str, patient_id: str, start_date: str, end_date: str, vita
     return str(getattr(resp, "text", "") or "").strip()
 
 
-@app.route("/api/patients", methods=["GET", "OPTIONS"])
-def api_patients():
-    if request.method == "OPTIONS":
-        return _corsify(app.make_response(("", 204)))
-    return jsonify({"patients": list_patients()})
+def _get_patient_id_from_query() -> str:
+    return str(request.args.get("patient_id") or request.args.get("patientId") or "").strip()
 
 
-@app.route("/api/patients/<patient_id>/dashboard", methods=["GET", "OPTIONS"])
-def api_patient_dashboard(patient_id: str):
-    if request.method == "OPTIONS":
-        return _corsify(app.make_response(("", 204)))
+def _get_patient_id_from_body(payload: Dict[str, Any]) -> str:
+    return str(payload.get("patient_id") or payload.get("patientId") or "").strip()
 
+
+def _dashboard_response(patient_id: str):
     start = (request.args.get("start") or "").strip()
     end = (request.args.get("end") or "").strip()
     pipeline = (request.args.get("pipeline") or "123").strip()
@@ -555,6 +552,56 @@ def api_patient_dashboard(patient_id: str):
     )
 
 
+def _ai_summary_response(patient_id: str):
+    payload = request.get_json(silent=True) or {}
+    role = str(payload.get("role") or "patient").strip().lower()
+    start = str(payload.get("start_date") or "").strip()
+    end = str(payload.get("end_date") or "").strip()
+    pipeline = str(payload.get("pipeline") or "123").strip()
+
+    checkins = load_daily_checkins(patient_id)
+    if not checkins:
+        return jsonify({"error": "No DailyCheckIns found."}), 404
+    if not start or not end:
+        end = checkins[-1]["date"]
+        start = checkins[max(0, len(checkins) - 30)]["date"]
+    filtered = _filter_range(checkins, start=start, end=end)
+    vitals_stats = _stats_for_period(filtered)
+
+    summaries = load_summaries(patient_id, pipeline=pipeline)
+    latest = _latest_summary_on_or_before(summaries, end_date=end)
+    rx = latest.get("prescriptionSummary") if isinstance(latest.get("prescriptionSummary"), dict) else {}
+    labs = latest.get("labReportSummary") if isinstance(latest.get("labReportSummary"), dict) else {}
+
+    text = _ai_summary(role, patient_id, start, end, vitals_stats, rx, labs)
+    return jsonify({"text": text})
+
+
+@app.route("/api/patients", methods=["GET", "OPTIONS"])
+def api_patients():
+    if request.method == "OPTIONS":
+        return _corsify(app.make_response(("", 204)))
+    return jsonify({"patients": list_patients()})
+
+
+@app.route("/api/dashboard", methods=["GET", "OPTIONS"])
+def api_dashboard():
+    if request.method == "OPTIONS":
+        return _corsify(app.make_response(("", 204)))
+    patient_id = _get_patient_id_from_query()
+    if not patient_id:
+        return jsonify({"error": "Missing patient_id"}), 400
+    return _dashboard_response(patient_id)
+
+
+
+@app.route("/api/patients/<patient_id>/dashboard", methods=["GET", "OPTIONS"])
+def api_patient_dashboard(patient_id: str):
+    if request.method == "OPTIONS":
+        return _corsify(app.make_response(("", 204)))
+    return _dashboard_response(patient_id)
+
+
 @app.route("/api/doctor/overview", methods=["GET", "OPTIONS"])
 def api_doctor_overview():
     if request.method == "OPTIONS":
@@ -588,29 +635,18 @@ def api_doctor_overview():
 def api_patient_ai_summary(patient_id: str):
     if request.method == "OPTIONS":
         return _corsify(app.make_response(("", 204)))
+    return _ai_summary_response(patient_id)
 
+
+@app.route("/api/ai-summary", methods=["POST", "OPTIONS"])
+def api_ai_summary():
+    if request.method == "OPTIONS":
+        return _corsify(app.make_response(("", 204)))
     payload = request.get_json(silent=True) or {}
-    role = str(payload.get("role") or "patient").strip().lower()
-    start = str(payload.get("start_date") or "").strip()
-    end = str(payload.get("end_date") or "").strip()
-    pipeline = str(payload.get("pipeline") or "123").strip()
-
-    checkins = load_daily_checkins(patient_id)
-    if not checkins:
-        return jsonify({"error": "No DailyCheckIns found."}), 404
-    if not start or not end:
-        end = checkins[-1]["date"]
-        start = checkins[max(0, len(checkins) - 30)]["date"]
-    filtered = _filter_range(checkins, start=start, end=end)
-    vitals_stats = _stats_for_period(filtered)
-
-    summaries = load_summaries(patient_id, pipeline=pipeline)
-    latest = _latest_summary_on_or_before(summaries, end_date=end)
-    rx = latest.get("prescriptionSummary") if isinstance(latest.get("prescriptionSummary"), dict) else {}
-    labs = latest.get("labReportSummary") if isinstance(latest.get("labReportSummary"), dict) else {}
-
-    text = _ai_summary(role, patient_id, start, end, vitals_stats, rx, labs)
-    return jsonify({"text": text})
+    patient_id = _get_patient_id_from_body(payload)
+    if not patient_id:
+        return jsonify({"error": "Missing patient_id"}), 400
+    return _ai_summary_response(patient_id)
 
 
 if __name__ == "__main__":

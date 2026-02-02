@@ -633,7 +633,9 @@ function normalizeTask(input, idx) {
 async function aiActionTasks(role, patientId, startDate, endDate, vitalsStats, notes, rx, labs) {
   const key = String(process.env.GOOGLE_API_KEY || "").trim();
   if (!key) return { tasks: [], warning: "GOOGLE_API_KEY not set" };
-  const notesIn = (Array.isArray(notes) ? notes : []).slice(0, 12).map((n) => ({ date: String(n.date || ""), note: String(n.raw || "").slice(0, 600) }));
+  const maxTasks = role === "patient" ? 8 : 12;
+  const notesLimit = role === "patient" ? 6 : 12;
+  const notesIn = (Array.isArray(notes) ? notes : []).slice(0, notesLimit).map((n) => ({ date: String(n.date || ""), note: String(n.raw || "").slice(0, 600) }));
   const payload = {
     role,
     patient_id: patientId,
@@ -644,15 +646,23 @@ async function aiActionTasks(role, patientId, startDate, endDate, vitalsStats, n
     labs_asof: labs,
     notes: notesIn
   };
-  const prompt =
-    "Convert the notes and prescriptions into actionable tasks for patient and clinic.\n" +
+  const rules =
     "Rules:\n" +
     "- Output ONLY valid JSON: {\"tasks\": [...]}\n" +
     "- Each task: {\"title\",\"audience\":\"patient|clinic|both\",\"type\":\"once|daily|conditional\",\"schedule\":{...},\"condition\",\"action\",\"explanation\"}\n" +
-    "- For daily tasks: set type=\"daily\" and schedule.days=N (e.g., 3 days)\n" +
+    "- For daily tasks: set type=\"daily\" and schedule.days=N\n" +
     "- For conditional tasks: type=\"conditional\" and include condition\n" +
-    "- Keep <= 12 tasks. Titles short.\n\n" +
-    `JSON:\n${JSON.stringify(payload, null, 2)}`;
+    `- Keep <= ${maxTasks} tasks. Titles short.\n`;
+  const roleGuide =
+    role === "doctor"
+      ? "Audience targeting:\n- Prefer audience=\"clinic\" or \"both\". Avoid patient-only tasks unless essential.\n- Make tasks clinician-optimized: medication review, follow-up planning, ordering/triage, monitoring thresholds.\n- Use concise, actionable language.\n"
+      : "Audience targeting:\n- Prefer audience=\"patient\" or \"both\". Do NOT output clinic-only tasks.\n- Make tasks patient-optimized: simple steps, what to do today, and when to seek care.\n- Avoid medical jargon. Keep instructions safe and non-prescriptive.\n";
+  const prompt =
+    "Convert the notes and prescriptions into actionable tasks.\n" +
+    rules +
+    roleGuide +
+    "\nJSON:\n" +
+    JSON.stringify(payload, null, 2);
   const text = await geminiGenerateText(prompt);
   const parsed = extractFirstJsonValue(text);
   const obj = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : null;
@@ -663,7 +673,11 @@ async function aiActionTasks(role, patientId, startDate, endDate, vitalsStats, n
     if (norm) tasks.push(norm);
     if (tasks.length >= 12) break;
   }
-  return { tasks };
+  const filtered =
+    role === "doctor"
+      ? tasks.filter((t) => t.audience !== "patient")
+      : tasks.filter((t) => t.audience !== "clinic");
+  return { tasks: filtered.slice(0, maxTasks) };
 }
 
 function normalizeSeverity(v) {
@@ -1019,6 +1033,196 @@ function explainAlert(role, headline, evidence) {
   return safeText(`${headline} — ${text}`, 520);
 }
 
+function getPatientIdFromSearchParams(searchParams) {
+  const a = String(searchParams?.get("patient_id") || "").trim();
+  const b = String(searchParams?.get("patientId") || "").trim();
+  return a || b;
+}
+
+function normalizeRole(v) {
+  const s = String(v || "").trim().toLowerCase();
+  return s === "doctor" ? "doctor" : "patient";
+}
+
+function parseBool(v) {
+  return new Set(["1", "true", "yes"]).has(String(v || "").trim().toLowerCase());
+}
+
+function searchParamsFromBody(payload) {
+  const sp = new URLSearchParams();
+  const role = String(payload?.role || "").trim();
+  const pipeline = String(payload?.pipeline || "").trim();
+  const start = String(payload?.start || payload?.start_date || "").trim();
+  const end = String(payload?.end || payload?.end_date || "").trim();
+  const simplify = payload?.simplify_notes ?? payload?.simplifyNotes ?? null;
+
+  if (role) sp.set("role", role);
+  if (pipeline) sp.set("pipeline", pipeline);
+  if (start) sp.set("start", start);
+  if (end) sp.set("end", end);
+  if (simplify !== null && simplify !== undefined && simplify !== "") sp.set("simplify_notes", String(simplify));
+
+  return sp;
+}
+
+async function resolvePeriodFromQuery(db, patientId, searchParams) {
+  let start = String(searchParams?.get("start") || "").trim();
+  let end = String(searchParams?.get("end") || "").trim();
+
+  let filtered;
+  if (start && end) {
+    filtered = await loadDailyCheckinsRange(db, patientId, start, end);
+  } else {
+    filtered = await loadDailyCheckinsRecent(db, patientId, 30);
+    if (filtered.length) {
+      end = filtered[filtered.length - 1].date;
+      start = filtered[0].date;
+    }
+  }
+
+  return { filtered, start, end };
+}
+
+async function resolvePeriodFromBody(db, patientId, payload) {
+  let start = String(payload?.start_date || "").trim();
+  let end = String(payload?.end_date || "").trim();
+
+  let filtered;
+  if (start && end) {
+    filtered = await loadDailyCheckinsRange(db, patientId, start, end);
+  } else {
+    filtered = await loadDailyCheckinsRecent(db, patientId, 30);
+    if (filtered.length) {
+      end = filtered[filtered.length - 1].date;
+      start = filtered[0].date;
+    }
+  }
+
+  return { filtered, start, end };
+}
+
+async function buildDashboardResponse(db, patientId, role, pipeline, simplifyNotes, searchParams) {
+  const period = await resolvePeriodFromQuery(db, patientId, searchParams);
+  const filtered = period.filtered || [];
+  const start = period.start;
+  const end = period.end;
+  if (!filtered.length) return { status: 404, body: { patient_id: patientId, error: "No DailyCheckIns found." } };
+
+  const vitalsStats = statsForPeriod(filtered);
+  const baseline = baselineMap(filtered, ["SBP", "DBP", "HR", "RR", "SpO2", "Temp", "Pulse", "weightKg", "BMI"]);
+
+  const latest = await loadLatestSummary(db, patientId, pipeline);
+  const rx = latest.prescriptionSummary && typeof latest.prescriptionSummary === "object" ? latest.prescriptionSummary : {};
+  const labs = latest.labReportSummary && typeof latest.labReportSummary === "object" ? latest.labReportSummary : {};
+
+  const risk = riskAlerts(filtered, rx, labs);
+  const notes = notesFromRows(filtered, role === "patient" ? 3 : 6);
+
+  if (role === "doctor" && simplifyNotes && String(process.env.GOOGLE_API_KEY || "").trim()) {
+    const simple = await aiSimpleNotes(notes);
+    for (const n of notes) {
+      const key = String(n.date || "").slice(0, 10);
+      if (simple[key]) n.text = simple[key];
+    }
+  }
+
+  const uniqueDates = Array.from(new Set(filtered.map((x) => String(x.date || "")).filter(Boolean))).sort();
+  const notesMeta = { days: uniqueDates.length, start: uniqueDates[0] || start, end: uniqueDates[uniqueDates.length - 1] || end };
+
+  const active = Array.isArray(rx.active_medications) ? rx.active_medications : [];
+  const inactive = Array.isArray(rx.inactive_medications) ? rx.inactive_medications : [];
+  const abn = Array.isArray(labs.abnormal_labs) ? labs.abnormal_labs : [];
+  const resolved = Array.isArray(labs.resolved_labs) ? labs.resolved_labs : [];
+
+  return {
+    status: 200,
+    body: {
+      patient_id: patientId,
+      start_date: start,
+      end_date: end,
+      metrics: METRICS,
+      baseline,
+      checkins: filtered,
+      vitals_stats: vitalsStats,
+      risk_alerts: risk,
+      notes_meta: notesMeta,
+      notes,
+      rx_glance: {
+        active_count: active.length,
+        inactive_count: inactive.length,
+        risk_flags: Array.isArray(rx.risk_flags) ? rx.risk_flags : []
+      },
+      labs_glance: {
+        abnormal_count: abn.length,
+        resolved_count: resolved.length,
+        risk_flags: Array.isArray(labs.risk_flags) ? labs.risk_flags : []
+      },
+      rx: {
+        as_of_date: isoDate10(rx.as_of_date || latest.date || end),
+        active_medications: normalizeStringList(active, 60),
+        inactive_medications: normalizeStringList(inactive, 60),
+        risk_flags: normalizeStringList(rx.risk_flags, 20)
+      },
+      labs: {
+        as_of_date: isoDate10(labs.as_of_date || latest.date || end),
+        abnormal_labs: normalizeStringList(abn, 60),
+        resolved_labs: normalizeStringList(resolved, 60),
+        risk_flags: normalizeStringList(labs.risk_flags, 20)
+      }
+    }
+  };
+}
+
+async function buildActionTasksResponse(db, patientId, role, pipeline, searchParams) {
+  const period = await resolvePeriodFromQuery(db, patientId, searchParams);
+  const filtered = period.filtered || [];
+  const start = period.start;
+  const end = period.end;
+  if (!filtered.length) return { status: 404, body: { patient_id: patientId, error: "No DailyCheckIns found." } };
+
+  const vitalsStats = statsForPeriod(filtered);
+  const latest = await loadLatestSummary(db, patientId, pipeline);
+  const rx = latest.prescriptionSummary && typeof latest.prescriptionSummary === "object" ? latest.prescriptionSummary : {};
+  const labs = latest.labReportSummary && typeof latest.labReportSummary === "object" ? latest.labReportSummary : {};
+  const notes = notesFromRows(filtered, 12);
+
+  const out = await aiActionTasks(role, patientId, start, end, vitalsStats, notes, rx, labs);
+  return { status: 200, body: { patient_id: patientId, start_date: start, end_date: end, tasks: out.tasks || [], warning: out.warning || "" } };
+}
+
+async function buildDiagnosisAlertsResponse(db, patientId, role, pipeline, searchParams) {
+  const period = await resolvePeriodFromQuery(db, patientId, searchParams);
+  const filtered = period.filtered || [];
+  const start = period.start;
+  const end = period.end;
+  if (!filtered.length) return { status: 404, body: { patient_id: patientId, error: "No DailyCheckIns found." } };
+
+  const latest = await loadLatestSummary(db, patientId, pipeline);
+  const rx = latest.prescriptionSummary && typeof latest.prescriptionSummary === "object" ? latest.prescriptionSummary : {};
+  const labs = latest.labReportSummary && typeof latest.labReportSummary === "object" ? latest.labReportSummary : {};
+  const notes = notesFromRows(filtered, 12);
+
+  const out = await aiRiskAlerts(role, patientId, start, end, filtered, notes, rx, labs);
+  return { status: 200, body: { patient_id: patientId, start_date: start, end_date: end, alerts: out?.alerts || [], warning: out?.warning || "" } };
+}
+
+async function buildAiSummaryResponse(db, patientId, payload) {
+  const role = normalizeRole(payload?.role || "patient");
+  const pipeline = String(payload?.pipeline || "123").trim();
+  const period = await resolvePeriodFromBody(db, patientId, payload);
+  const filtered = period.filtered || [];
+  const start = period.start;
+  const end = period.end;
+  if (!filtered.length) return { status: 404, body: { error: "No DailyCheckIns found." } };
+
+  const vitalsStats = statsForPeriod(filtered);
+  const latest = await loadLatestSummary(db, patientId, pipeline);
+  const rx = latest.prescriptionSummary && typeof latest.prescriptionSummary === "object" ? latest.prescriptionSummary : {};
+  const labs = latest.labReportSummary && typeof latest.labReportSummary === "object" ? latest.labReportSummary : {};
+  const text = await aiSummary(role, patientId, start, end, vitalsStats, rx, labs);
+  return { status: 200, body: { text: text || "" } };
+}
+
 function parsePath(req) {
   const u = new URL(req.url, "http://localhost");
   return { pathname: u.pathname, searchParams: u.searchParams };
@@ -1079,88 +1283,101 @@ async function handle(req, res) {
     }
   }
 
+  if (req.method === "POST" && path === "/api/dashboard") {
+    try {
+      const payload = await readJson(req);
+      const patientId = String(payload.patient_id || payload.patientId || "").trim();
+      if (!patientId) return json(res, 400, { error: "Missing patient_id" });
+      const role = normalizeRole(payload.role || "patient");
+      const pipeline = String(payload.pipeline || "123").trim();
+      const simplifyNotes = parseBool(payload.simplify_notes ?? payload.simplifyNotes);
+      const sp = searchParamsFromBody(payload);
+      const out = await buildDashboardResponse(db, patientId, role, pipeline, simplifyNotes, sp);
+      return json(res, out.status, out.body);
+    } catch (e) {
+      return json(res, 500, { error: String(e?.message || e || "Failed") });
+    }
+  }
+
+  if (req.method === "GET" && path === "/api/dashboard") {
+    const patientId = getPatientIdFromSearchParams(searchParams);
+    if (!patientId) return json(res, 400, { error: "Missing patient_id" });
+    const role = normalizeRole(searchParams.get("role") || "patient");
+    const pipeline = String(searchParams.get("pipeline") || "123").trim();
+    const simplifyNotes = parseBool(searchParams.get("simplify_notes"));
+    const out = await buildDashboardResponse(db, patientId, role, pipeline, simplifyNotes, searchParams);
+    return json(res, out.status, out.body);
+  }
+
+  if (req.method === "POST" && path === "/api/action-tasks") {
+    try {
+      const payload = await readJson(req);
+      const patientId = String(payload.patient_id || payload.patientId || "").trim();
+      if (!patientId) return json(res, 400, { error: "Missing patient_id" });
+      const role = normalizeRole(payload.role || "patient");
+      const pipeline = String(payload.pipeline || "123").trim();
+      const sp = searchParamsFromBody(payload);
+      const out = await buildActionTasksResponse(db, patientId, role, pipeline, sp);
+      return json(res, out.status, out.body);
+    } catch (e) {
+      return json(res, 500, { error: String(e?.message || e || "Failed") });
+    }
+  }
+
+  if (req.method === "GET" && path === "/api/action-tasks") {
+    const patientId = getPatientIdFromSearchParams(searchParams);
+    if (!patientId) return json(res, 400, { error: "Missing patient_id" });
+    const role = normalizeRole(searchParams.get("role") || "patient");
+    const pipeline = String(searchParams.get("pipeline") || "123").trim();
+    const out = await buildActionTasksResponse(db, patientId, role, pipeline, searchParams);
+    return json(res, out.status, out.body);
+  }
+
+  if (req.method === "POST" && path === "/api/diagnosis-alerts") {
+    try {
+      const payload = await readJson(req);
+      const patientId = String(payload.patient_id || payload.patientId || "").trim();
+      if (!patientId) return json(res, 400, { error: "Missing patient_id" });
+      const role = normalizeRole(payload.role || "patient");
+      const pipeline = String(payload.pipeline || "123").trim();
+      const sp = searchParamsFromBody(payload);
+      const out = await buildDiagnosisAlertsResponse(db, patientId, role, pipeline, sp);
+      return json(res, out.status, out.body);
+    } catch (e) {
+      return json(res, 500, { error: String(e?.message || e || "Failed") });
+    }
+  }
+
+  if (req.method === "GET" && path === "/api/diagnosis-alerts") {
+    const patientId = getPatientIdFromSearchParams(searchParams);
+    if (!patientId) return json(res, 400, { error: "Missing patient_id" });
+    const role = normalizeRole(searchParams.get("role") || "patient");
+    const pipeline = String(searchParams.get("pipeline") || "123").trim();
+    const out = await buildDiagnosisAlertsResponse(db, patientId, role, pipeline, searchParams);
+    return json(res, out.status, out.body);
+  }
+
+  if (req.method === "POST" && path === "/api/ai-summary") {
+    try {
+      const payload = await readJson(req);
+      const patientId = String(payload.patient_id || payload.patientId || "").trim();
+      if (!patientId) return json(res, 400, { error: "Missing patient_id" });
+      const out = await buildAiSummaryResponse(db, patientId, payload);
+      return json(res, out.status, out.body);
+    } catch (e) {
+      return json(res, 500, { error: String(e?.message || e || "Failed") });
+    }
+  }
+
   const dashMatch = path.match(/^\/api\/patients\/([^/]+)\/dashboard$/);
   if (req.method === "GET" && dashMatch) {
     const patientId = decodeURIComponent(dashMatch[1]);
-    const role = String(searchParams.get("role") || "patient").trim().toLowerCase();
+    const role = normalizeRole(searchParams.get("role") || "patient");
     const pipeline = String(searchParams.get("pipeline") || "123").trim();
-    const simplifyNotes = new Set(["1", "true", "yes"]).has(String(searchParams.get("simplify_notes") || "").trim().toLowerCase());
-
     try {
-      let start = String(searchParams.get("start") || "").trim();
-      let end = String(searchParams.get("end") || "").trim();
-      let filtered;
-      if (start && end) {
-        filtered = await loadDailyCheckinsRange(db, patientId, start, end);
-      } else {
-        filtered = await loadDailyCheckinsRecent(db, patientId, 30);
-        if (filtered.length) {
-          end = filtered[filtered.length - 1].date;
-          start = filtered[0].date;
-        }
-      }
-      if (!filtered.length) return json(res, 404, { patient_id: patientId, error: "No DailyCheckIns found." });
-
-      const vitalsStats = statsForPeriod(filtered);
-      const baseline = baselineMap(filtered, ["SBP", "DBP", "HR", "RR", "SpO2", "Temp", "Pulse", "weightKg", "BMI"]);
-
-      const latest = await loadLatestSummary(db, patientId, pipeline);
-      const rx = latest.prescriptionSummary && typeof latest.prescriptionSummary === "object" ? latest.prescriptionSummary : {};
-      const labs = latest.labReportSummary && typeof latest.labReportSummary === "object" ? latest.labReportSummary : {};
-
-      const risk = riskAlerts(filtered, rx, labs);
-      const notes = notesFromRows(filtered, role === "patient" ? 3 : 6);
-
-      if (role === "doctor" && simplifyNotes && String(process.env.GOOGLE_API_KEY || "").trim()) {
-        const simple = await aiSimpleNotes(notes);
-        for (const n of notes) {
-          const key = String(n.date || "").slice(0, 10);
-          if (simple[key]) n.text = simple[key];
-        }
-      }
-
-      const uniqueDates = Array.from(new Set(filtered.map((x) => String(x.date || "")).filter(Boolean))).sort();
-      const notesMeta = { days: uniqueDates.length, start: uniqueDates[0] || start, end: uniqueDates[uniqueDates.length - 1] || end };
-
-      const active = Array.isArray(rx.active_medications) ? rx.active_medications : [];
-      const inactive = Array.isArray(rx.inactive_medications) ? rx.inactive_medications : [];
-      const abn = Array.isArray(labs.abnormal_labs) ? labs.abnormal_labs : [];
-      const resolved = Array.isArray(labs.resolved_labs) ? labs.resolved_labs : [];
-
-      return json(res, 200, {
-        patient_id: patientId,
-        start_date: start,
-        end_date: end,
-        metrics: METRICS,
-        baseline,
-        checkins: filtered,
-        vitals_stats: vitalsStats,
-        risk_alerts: risk,
-        notes_meta: notesMeta,
-        notes,
-        rx_glance: {
-          active_count: active.length,
-          inactive_count: inactive.length,
-          risk_flags: Array.isArray(rx.risk_flags) ? rx.risk_flags : []
-        },
-        labs_glance: {
-          abnormal_count: abn.length,
-          resolved_count: resolved.length,
-          risk_flags: Array.isArray(labs.risk_flags) ? labs.risk_flags : []
-        },
-        rx: {
-          as_of_date: isoDate10(rx.as_of_date || latest.date || end),
-          active_medications: normalizeStringList(active, 60),
-          inactive_medications: normalizeStringList(inactive, 60),
-          risk_flags: normalizeStringList(rx.risk_flags, 20)
-        },
-        labs: {
-          as_of_date: isoDate10(labs.as_of_date || latest.date || end),
-          abnormal_labs: normalizeStringList(abn, 60),
-          resolved_labs: normalizeStringList(resolved, 60),
-          risk_flags: normalizeStringList(labs.risk_flags, 20)
-        }
-      });
+      const simplifyNotes = parseBool(searchParams.get("simplify_notes"));
+      const out = await buildDashboardResponse(db, patientId, role, pipeline, simplifyNotes, searchParams);
+      return json(res, out.status, out.body);
     } catch (e) {
       return json(res, 500, { error: String(e?.message || e || "Failed") });
     }
@@ -1169,31 +1386,11 @@ async function handle(req, res) {
   const tasksMatch = path.match(/^\/api\/patients\/([^/]+)\/action-tasks$/);
   if (req.method === "GET" && tasksMatch) {
     const patientId = decodeURIComponent(tasksMatch[1]);
-    const role = String(searchParams.get("role") || "patient").trim().toLowerCase();
+    const role = normalizeRole(searchParams.get("role") || "patient");
     const pipeline = String(searchParams.get("pipeline") || "123").trim();
     try {
-      let start = String(searchParams.get("start") || "").trim();
-      let end = String(searchParams.get("end") || "").trim();
-      let filtered;
-      if (start && end) {
-        filtered = await loadDailyCheckinsRange(db, patientId, start, end);
-      } else {
-        filtered = await loadDailyCheckinsRecent(db, patientId, 30);
-        if (filtered.length) {
-          end = filtered[filtered.length - 1].date;
-          start = filtered[0].date;
-        }
-      }
-      if (!filtered.length) return json(res, 404, { patient_id: patientId, error: "No DailyCheckIns found." });
-
-      const vitalsStats = statsForPeriod(filtered);
-      const latest = await loadLatestSummary(db, patientId, pipeline);
-      const rx = latest.prescriptionSummary && typeof latest.prescriptionSummary === "object" ? latest.prescriptionSummary : {};
-      const labs = latest.labReportSummary && typeof latest.labReportSummary === "object" ? latest.labReportSummary : {};
-      const notes = notesFromRows(filtered, 12);
-
-      const out = await aiActionTasks(role, patientId, start, end, vitalsStats, notes, rx, labs);
-      return json(res, 200, { patient_id: patientId, start_date: start, end_date: end, tasks: out.tasks || [], warning: out.warning || "" });
+      const out = await buildActionTasksResponse(db, patientId, role, pipeline, searchParams);
+      return json(res, out.status, out.body);
     } catch (e) {
       return json(res, 500, { error: String(e?.message || e || "Failed") });
     }
@@ -1202,36 +1399,11 @@ async function handle(req, res) {
   const diagMatch = path.match(/^\/api\/patients\/([^/]+)\/diagnosis-alerts$/);
   if (req.method === "GET" && diagMatch) {
     const patientId = decodeURIComponent(diagMatch[1]);
-    const role = String(searchParams.get("role") || "patient").trim().toLowerCase();
+    const role = normalizeRole(searchParams.get("role") || "patient");
     const pipeline = String(searchParams.get("pipeline") || "123").trim();
     try {
-      let start = String(searchParams.get("start") || "").trim();
-      let end = String(searchParams.get("end") || "").trim();
-      let filtered;
-      if (start && end) {
-        filtered = await loadDailyCheckinsRange(db, patientId, start, end);
-      } else {
-        filtered = await loadDailyCheckinsRecent(db, patientId, 30);
-        if (filtered.length) {
-          end = filtered[filtered.length - 1].date;
-          start = filtered[0].date;
-        }
-      }
-      if (!filtered.length) return json(res, 404, { patient_id: patientId, error: "No DailyCheckIns found." });
-
-      const latest = await loadLatestSummary(db, patientId, pipeline);
-      const rx = latest.prescriptionSummary && typeof latest.prescriptionSummary === "object" ? latest.prescriptionSummary : {};
-      const labs = latest.labReportSummary && typeof latest.labReportSummary === "object" ? latest.labReportSummary : {};
-      const notes = notesFromRows(filtered, 12);
-
-      const out = await aiRiskAlerts(role, patientId, start, end, filtered, notes, rx, labs);
-      return json(res, 200, {
-        patient_id: patientId,
-        start_date: start,
-        end_date: end,
-        alerts: out?.alerts || [],
-        warning: out?.warning || ""
-      });
+      const out = await buildDiagnosisAlertsResponse(db, patientId, role, pipeline, searchParams);
+      return json(res, out.status, out.body);
     } catch (e) {
       return json(res, 500, { error: String(e?.message || e || "Failed") });
     }
@@ -1242,30 +1414,8 @@ async function handle(req, res) {
     const patientId = decodeURIComponent(aiMatch[1]);
     try {
       const payload = await readJson(req);
-      const role = String(payload.role || "patient").trim().toLowerCase();
-      const pipeline = String(payload.pipeline || "123").trim();
-      let start = String(payload.start_date || "").trim();
-      let end = String(payload.end_date || "").trim();
-
-      let filtered;
-      if (start && end) {
-        filtered = await loadDailyCheckinsRange(db, patientId, start, end);
-      } else {
-        filtered = await loadDailyCheckinsRecent(db, patientId, 30);
-        if (filtered.length) {
-          end = filtered[filtered.length - 1].date;
-          start = filtered[0].date;
-        }
-      }
-      if (!filtered.length) return json(res, 404, { error: "No DailyCheckIns found." });
-      const vitalsStats = statsForPeriod(filtered);
-
-      const latest = await loadLatestSummary(db, patientId, pipeline);
-      const rx = latest.prescriptionSummary && typeof latest.prescriptionSummary === "object" ? latest.prescriptionSummary : {};
-      const labs = latest.labReportSummary && typeof latest.labReportSummary === "object" ? latest.labReportSummary : {};
-
-      const text = await aiSummary(role, patientId, start, end, vitalsStats, rx, labs);
-      return json(res, 200, { text: text || "" });
+      const out = await buildAiSummaryResponse(db, patientId, payload);
+      return json(res, out.status, out.body);
     } catch (e) {
       return json(res, 500, { error: String(e?.message || e || "Failed") });
     }

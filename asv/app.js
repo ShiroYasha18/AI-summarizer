@@ -635,10 +635,14 @@ async function loadDashboard() {
     if (!patientId) return;
     const start = els.start.value;
     const end = els.end.value;
-    const simplify = role === "doctor" && els.simplifyNotes.checked ? "&simplify_notes=1" : "";
-    const payload = await apiGet(
-      `/api/patients/${encodeURIComponent(patientId)}/dashboard?role=${role}&start=${start}&end=${end}${simplify}`
-    );
+    const payload = await apiPost(`/api/dashboard`, {
+      patient_id: patientId,
+      role,
+      start,
+      end,
+      pipeline: "123",
+      simplify_notes: role === "doctor" && els.simplifyNotes.checked ? "1" : ""
+    });
     els.meta.textContent = `Showing ${payload.start_date} → ${payload.end_date}. Deltas are vs baseline (first day).`;
     renderRisk(payload.risk_alerts);
     renderMetricCards(payload);
@@ -658,11 +662,7 @@ async function genActionTasks() {
     if (!patientId) return;
     const start = els.start.value;
     const end = els.end.value;
-    const out = await apiGet(
-      `/api/patients/${encodeURIComponent(patientId)}/action-tasks?role=${encodeURIComponent(role)}&start=${encodeURIComponent(
-        start
-      )}&end=${encodeURIComponent(end)}&pipeline=123`
-    );
+    const out = await apiPost(`/api/action-tasks`, { patient_id: patientId, role, start, end, pipeline: "123" });
     renderTasks(out);
   } catch (e) {
     if (els.tasksMeta) els.tasksMeta.textContent = String(e?.message || e || "Failed");
@@ -679,11 +679,7 @@ async function checkDiagnosisAlerts() {
     if (!patientId) return;
     const start = els.start.value;
     const end = els.end.value;
-    const out = await apiGet(
-      `/api/patients/${encodeURIComponent(patientId)}/diagnosis-alerts?role=${encodeURIComponent(role)}&start=${encodeURIComponent(
-        start
-      )}&end=${encodeURIComponent(end)}&pipeline=123`
-    );
+    const out = await apiPost(`/api/diagnosis-alerts`, { patient_id: patientId, role, start, end, pipeline: "123" });
     renderDiagnosisAlerts(out);
   } catch (e) {
     if (els.alertsMeta) els.alertsMeta.textContent = String(e?.message || e || "Failed");
@@ -701,7 +697,8 @@ async function genAiSummary() {
     const end = els.end.value;
     if (!patientId) return;
     els.aiSummary.textContent = "Loading...";
-    const out = await apiPost(`/api/patients/${encodeURIComponent(patientId)}/ai-summary`, {
+    const out = await apiPost(`/api/ai-summary`, {
+      patient_id: patientId,
       role,
       start_date: start,
       end_date: end,
@@ -732,7 +729,7 @@ async function bootstrap() {
   const firstPid = els.patient.value;
   if (firstPid) {
     try {
-      const dash = await apiGet(`/api/patients/${encodeURIComponent(firstPid)}/dashboard?role=patient`);
+      const dash = await apiPost(`/api/dashboard`, { patient_id: firstPid, role: "patient", pipeline: "123" });
       const checkins = dash.checkins || [];
       computeDateDefaults(checkins);
     } catch {
@@ -766,7 +763,7 @@ els.range.addEventListener("change", async () => {
   if (!isCustom) {
     try {
       const pid = els.patient.value;
-      const dash = await apiGet(`/api/patients/${encodeURIComponent(pid)}/dashboard?role=${els.mode.value}`);
+      const dash = await apiPost(`/api/dashboard`, { patient_id: pid, role: els.mode.value, pipeline: "123" });
       setRangeFromPreset(dash.checkins || [], Number(v));
     } catch {}
   }
@@ -775,7 +772,7 @@ els.range.addEventListener("change", async () => {
 els.patient.addEventListener("change", async () => {
   try {
     const pid = els.patient.value;
-    const dash = await apiGet(`/api/patients/${encodeURIComponent(pid)}/dashboard?role=${els.mode.value}`);
+    const dash = await apiPost(`/api/dashboard`, { patient_id: pid, role: els.mode.value, pipeline: "123" });
     computeDateDefaults(dash.checkins || []);
   } catch {}
 });

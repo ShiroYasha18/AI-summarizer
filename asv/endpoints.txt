@@ -1,0 +1,356 @@
+AI Summary Viewer (ASV) - Endpoint Reference
+============================================
+
+Base URLs
+- Prod: https://ai-summarizer-cwl8.vercel.app
+- Local dev: http://127.0.0.1:5177
+
+Quick curl tips
+- Add -sS for readable errors, and pipe to jq if installed.
+- Set your base URL once:
+  - BASE="https://ai-summarizer-cwl8.vercel.app"
+  - BASE="http://127.0.0.1:5177"
+
+Auth
+- None (no auth headers are used by the UI).
+
+Content Types
+- Requests: JSON for POST endpoints only.
+- Responses: application/json; charset=utf-8 for all /api/* endpoints.
+
+CORS / Preflight
+- OPTIONS any path returns 204 with CORS headers.
+
+Error Format
+- 404: {"error":"Not found"} (or endpoint-specific 404 bodies noted below)
+- 500: {"error":"...message..."}
+
+
+1) Health
+---------
+GET /api/health
+
+Curl
+curl -sS "$BASE/api/health"
+
+Request
+- Query: none
+- Body: none
+
+Response 200
+{
+  "ok": true,
+  "ts": "2026-02-01T16:23:09.828Z"
+}
+
+
+2) Patients List
+----------------
+GET /api/patients
+
+Curl
+curl -sS "$BASE/api/patients"
+
+Request
+- Query: none
+- Body: none
+
+Response 200
+{
+  "patients": ["patient_001", "patient_002"]
+}
+
+
+3) Doctor Overview
+------------------
+GET /api/doctor/overview
+
+Curl
+curl -sS "$BASE/api/doctor/overview"
+
+curl -sS "$BASE/api/doctor/overview?pipeline=123"
+
+Request
+- Query:
+  - pipeline (string, optional, default "123")
+- Body: none
+
+Response 200
+{
+  "rows": [
+    {
+      "patient_id": "patient_001",
+      "last_checkin": "2025-08-14",
+      "risk": "High blood pressure",
+      "active_meds": 2,
+      "abnormal_labs": 1
+    }
+  ]
+}
+
+
+4) Patient Dashboard (core data)
+--------------------------------
+POST /api/dashboard
+
+Curl
+curl -sS -X POST "$BASE/api/dashboard" \
+  -H "Content-Type: application/json" \
+  -d '{"patient_id":"patient_001","role":"patient","pipeline":"123"}'
+
+curl -sS -X POST "$BASE/api/dashboard" \
+  -H "Content-Type: application/json" \
+  -d '{"patient_id":"patient_001","role":"doctor","pipeline":"123","start":"2025-07-16","end":"2025-08-14","simplify_notes":"1"}'
+
+Request
+- Headers:
+  - Content-Type: application/json
+- Body (JSON)
+  - patient_id (string, required)
+  - role (string, optional, default "patient")  Allowed: "patient" | "doctor"
+  - pipeline (string, optional, default "123")
+  - start (YYYY-MM-DD, optional)  If provided, end must be provided.
+  - end (YYYY-MM-DD, optional)    If provided, start must be provided.
+  - simplify_notes (optional)     "1"|"true"|"yes" enables Gemini note simplification (doctor mode only).
+
+Response 200 (shape)
+{
+  "patient_id": "patient_001",
+  "start_date": "2025-07-16",
+  "end_date": "2025-08-14",
+  "metrics": {
+    "SBP": { "label": "Systolic BP", "unit": "mmHg", "meaning": "..." }
+  },
+  "baseline": { "SBP": 126, "DBP": 81, "HR": 104 },
+  "checkins": [
+    {
+      "date": "2025-07-16",
+      "SBP": 126,
+      "DBP": 81,
+      "HR": 104,
+      "RR": 22,
+      "SpO2": 97,
+      "Temp": 38.2,
+      "Pulse": 103,
+      "weightKg": 71.2,
+      "BMI": 24.3,
+      "notes_short": "…",
+      "notes_full": "…"
+    }
+  ],
+  "vitals_stats": {
+    "days": 30,
+    "metrics": {
+      "SBP": { "min": 120, "max": 140, "avg": 130, "last": 126 }
+    }
+  },
+  "risk_alerts": [
+    { "severity": "high", "headline": "High blood pressure", "action": "Talk to your doctor soon." }
+  ],
+  "notes_meta": { "days": 30, "start": "2025-07-16", "end": "2025-08-14" },
+  "notes": [
+    {
+      "date": "2025-08-14",
+      "glance": "BP 126/81 • HR 103",
+      "keywords": ["fever"],
+      "text": "Short note…",
+      "raw": "Full note…"
+    }
+  ],
+  "rx_glance": { "active_count": 2, "inactive_count": 1, "risk_flags": ["..."] },
+  "labs_glance": { "abnormal_count": 1, "resolved_count": 0, "risk_flags": ["..."] },
+  "rx": {
+    "as_of_date": "2025-08-14",
+    "active_medications": ["…"],
+    "inactive_medications": ["…"],
+    "risk_flags": ["…"]
+  },
+  "labs": {
+    "as_of_date": "2025-08-14",
+    "abnormal_labs": ["…"],
+    "resolved_labs": ["…"],
+    "risk_flags": ["…"]
+  }
+}
+
+Response 404 (no check-ins)
+{
+  "patient_id": "patient_001",
+  "error": "No DailyCheckIns found."
+}
+
+
+5) Action Tasks (Gemini-generated)
+----------------------------------
+POST /api/action-tasks
+
+Curl
+curl -sS -X POST "$BASE/api/action-tasks" \
+  -H "Content-Type: application/json" \
+  -d '{"patient_id":"patient_001","role":"patient","pipeline":"123","start":"2025-07-16","end":"2025-08-14"}'
+
+curl -sS -X POST "$BASE/api/action-tasks" \
+  -H "Content-Type: application/json" \
+  -d '{"patient_id":"patient_001","role":"doctor","pipeline":"123","start":"2025-07-16","end":"2025-08-14"}'
+
+Request
+- Headers:
+  - Content-Type: application/json
+- Body (JSON)
+  - patient_id (string, required)
+  - role (string, optional, default "patient") Allowed: "patient" | "doctor"
+  - pipeline (string, optional, default "123")
+  - start (YYYY-MM-DD, optional)  If provided, end must be provided.
+  - end (YYYY-MM-DD, optional)    If provided, start must be provided.
+
+Response 200
+{
+  "patient_id": "patient_001",
+  "start_date": "2025-07-16",
+  "end_date": "2025-08-14",
+  "tasks": [
+    {
+      "id": "1",
+      "audience": "patient",
+      "title": "Take paracetamol",
+      "type": "daily",
+      "schedule": { "start_date": "2025-07-16", "end_date": "", "date": "", "days": 3 },
+      "condition": "",
+      "action": "Take 500mg after meals.",
+      "explanation": "Pain/fever relief as per note."
+    }
+  ],
+  "warning": ""
+}
+
+Notes
+- If GOOGLE_API_KEY is missing, tasks may be empty and warning is set.
+- Tasks are normalized to <= 12 items and text is length-capped.
+
+Response 404 (no check-ins)
+{
+  "patient_id": "patient_001",
+  "error": "No DailyCheckIns found."
+}
+
+
+6) Diagnosis Alerts (LLM-driven, with evidence)
+-----------------------------------------------
+POST /api/diagnosis-alerts
+
+Curl
+curl -sS -X POST "$BASE/api/diagnosis-alerts" \
+  -H "Content-Type: application/json" \
+  -d '{"patient_id":"patient_001","role":"patient","pipeline":"123","start":"2025-07-16","end":"2025-08-14"}'
+
+curl -sS -X POST "$BASE/api/diagnosis-alerts" \
+  -H "Content-Type: application/json" \
+  -d '{"patient_id":"patient_001","role":"doctor","pipeline":"123","start":"2025-07-16","end":"2025-08-14"}'
+
+Request
+- Headers:
+  - Content-Type: application/json
+- Body (JSON)
+  - patient_id (string, required)
+  - role (string, optional, default "patient") Allowed: "patient" | "doctor"
+  - pipeline (string, optional, default "123")
+  - start (YYYY-MM-DD, optional)  If provided, end must be provided.
+  - end (YYYY-MM-DD, optional)    If provided, start must be provided.
+
+Response 200
+{
+  "patient_id": "patient_001",
+  "start_date": "2025-07-16",
+  "end_date": "2025-08-14",
+  "alerts": [
+    {
+      "severity": "high",
+      "headline": "Low oxygen with breathing symptoms",
+      "reason": "SpO2 readings below 92% were observed with breathing symptoms noted.",
+      "action": "Consult a doctor soon.",
+      "evidence": [
+        {
+          "kind": "vital",
+          "label": "Oxygen (SpO2)",
+          "metric": "SpO2",
+          "unit": "%",
+          "threshold": "< 92",
+          "points": [{ "date": "2025-08-12", "value": 91 }]
+        },
+        {
+          "kind": "note",
+          "label": "Breathing symptoms mentioned",
+          "points": [{ "date": "2025-08-12", "keyword": "shortness of breath", "text": "…" }]
+        }
+      ],
+      "explanation": "Patient/doctor-facing explanation text."
+    }
+  ],
+  "warning": ""
+}
+
+Notes
+- Alerts are generated by Gemini, then filtered so they are only returned if evidence exists.
+- Polypharmacy is suppressed unless active_medications count >= 5.
+- If Gemini is unavailable/invalid, alerts will be empty and warning may be:
+  - "GOOGLE_API_KEY not set"
+  - "Gemini unavailable"
+  - "Invalid Gemini response"
+
+Response 404 (no check-ins)
+{
+  "patient_id": "patient_001",
+  "error": "No DailyCheckIns found."
+}
+
+
+7) AI Summary (Gemini-generated)
+--------------------------------
+POST /api/ai-summary
+
+Curl
+curl -sS -X POST "$BASE/api/ai-summary" \
+  -H "Content-Type: application/json" \
+  -d '{"patient_id":"patient_001","role":"patient","pipeline":"123","start_date":"2025-07-16","end_date":"2025-08-14"}'
+
+curl -sS -X POST "$BASE/api/ai-summary" \
+  -H "Content-Type: application/json" \
+  -d '{"patient_id":"patient_001","role":"doctor","pipeline":"123","start_date":"2025-07-16","end_date":"2025-08-14"}'
+
+Request
+- Headers:
+  - Content-Type: application/json
+- Body (JSON)
+{
+  "patient_id": "string",
+  "role": "patient|doctor",
+  "pipeline": "123",
+  "start_date": "YYYY-MM-DD",
+  "end_date": "YYYY-MM-DD"
+}
+
+Response 200
+{
+  "text": "Bullet point summary…"
+}
+
+Response 404 (no check-ins)
+{
+  "error": "No DailyCheckIns found."
+}
+
+Legacy (backward compatible)
+----------------------------
+- GET /api/dashboard?patient_id=...
+- GET /api/action-tasks?patient_id=...
+- GET /api/diagnosis-alerts?patient_id=...
+- GET /api/patients/:patientId/dashboard
+- GET /api/patients/:patientId/action-tasks
+- GET /api/patients/:patientId/diagnosis-alerts
+- POST /api/patients/:patientId/ai-summary
+
+
+Implementation Reference
+------------------------
+- Server router: asv/api/router.js
+- UI calls: asv/app.js
